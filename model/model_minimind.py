@@ -95,7 +95,7 @@ def precompute_freqs_cis(dim: int, end: int = 16*2048, rope_base: float = 1e6, r
             low, high  = math.max(math.floor(inv_dim(beta_slow)), 0), math.min(math.ceil(inv_dim(beta_fast)), dim//2-1)
             ramp = torch.clamp((torch.arange(dim//2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
             freqs = freqs * (1 - ramp + ramp / factor)
-    t = torch.range(end, device = freqs.device)
+    t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float() # end, dim//2
     freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attention_factor # end, dim
     freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attention_factor # end, dim
@@ -231,7 +231,7 @@ class MoEGate(nn.Module):
         else:
             aux_loss = scores.new_zeros(1).squeeze()
         return topk_weight, topk_idx, aux_loss
-class MoEFeedForward(nn.Mudule):
+class MoEFeedForward(nn.Module):
     def __init__(self, config: MiniMindConfig):
         super().__init__()
         self.config = config
@@ -289,7 +289,7 @@ class MoEFeedForward(nn.Mudule):
         """
         idxs = torch.argsort(flat_expert_indices) 
         # idxs中的每一个值是一个专家在num_tokens*num_experts_per_tok中的索引
-        token_ids = idxs // self.config.n_routed_experts
+        token_ids = idxs // self.config.num_experts_per_tokens
         # token_ids中的每一个值是一个专家在num_tokens中的索引
         tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
         # tokens_per_expert中的每一个值是一个专家处理的tokens数量，当做索引下标用的话是基于num_tokens*num_experts_per_tok
@@ -338,7 +338,7 @@ class MiniMindModel(nn.Module):
         self.layers = nn.ModuleList([MiniMindBlock(i, config) for i in range(config.num_hidden_layers)])
         self.head_dim = config.hidden_size // config.num_attention_heads
         freqs_cos, freqs_sin = precompute_freqs_cis(self.head_dim, config.max_position_embeddings, config.rope_theta, config.rope_scaling)
-        self.register_buffer("c", freqs_cos, persistent=False)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
     def forward(self,
@@ -384,10 +384,23 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         )
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+        # 3. 损失计算（核心修正部分）
+        loss = None
         if labels is not None:
-            shift_logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
-            shift_labesl = labels[:, 1:].contiguous().view(-1)
-            loss = F.cross_entropy(shift_logits, shift_labesl, ignore_index=-100)
+            # 标准的 Causal LM 训练逻辑：
+            # Input:  [A, B, C, D]
+            # Target: [B, C, D, E]
+            # 所以 Logits 丢掉最后一个，Labels 丢掉第一个，实现错位对齐
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            
+            # 展平以计算 CrossEntropy
+            # ignore_index=-100 是 PyTorch 默认的忽略索引，通常用于 Padding 部分
+            loss = F.cross_entropy(
+                shift_logits.view(-1, self.config.vocab_size), 
+                shift_labels.view(-1), 
+                ignore_index=-100
+            )
         output = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
         output.aux_loss = aux_loss
         return output
