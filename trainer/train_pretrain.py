@@ -78,7 +78,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
-                save_dir="../checkpoints",
+                save_dir="/root/autodl-tmp/miniMind/checkpoints",
                 scaler=scaler
             )
             model.train() 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累计步数")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default="/root/autodl-tmp/miniMind/out", help="模型保存目录")
     parser.add_argument('--save_weight', default='pretrain', type=str, help="保存权重前缀")
     parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Pretrain", help="wandb项目名")
-    parser.add_argument("--data_path", type=str, default="../dataset/pretrain_hq.jsonl", help="预训练数据路径")
+    parser.add_argument("--data_path", type=str, default="/root/autodl-tmp/miniMind/dataset/pretrain_hq.jsonl", help="预训练数据路径")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度")
@@ -144,7 +144,7 @@ if __name__ == "__main__":
 
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config=lm_config, from_weight=args.from_weight, device=args.device) # 这里model就已经加载了在checkpoint里的参数了
-    parser.add_argument("--data_path", type=str, default="../dataset/pretrain_hq.jsonl", help="预训练数据路径")
+    parser.add_argument("--data_path", type=str, default="/root/autodl-tmp/miniMind/dataset/pretrain_hq.jsonl", help="预训练数据路径")
     train_ds = PretrainDataset(args.data_path, tokenizer=tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.amp.GradScaler(device=device_type, enabled=(args.dtype == "float16"))
