@@ -352,8 +352,9 @@ class MiniMindModel(nn.Module):
         past_key_values = past_key_values or [None] * self.config.num_hidden_layers
         start = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         cis = (
-            self.freqs_sin[start : start + seq_len],
-            self.freqs_cos[start : start + seq_len]
+            self.freqs_cos[start : start + seq_len],
+            self.freqs_sin[start : start + seq_len]
+            
         )
         hidden_states = self.dropout(self.embd_tokens(input_ids))
         presents = []
