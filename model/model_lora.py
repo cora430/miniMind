@@ -1,0 +1,43 @@
+from networkx import multi_source_dijkstra
+from ngrok import forward
+import torch
+from torch import nn
+class LoRA(nn.Module):
+    def __init__(self, in_features, out_features, rank):
+        super().__init__()
+        self.A = nn.Linear(in_features, rank, bias=False)
+        self.B = nn.Linear(rank, out_features, bias=False)
+        # 矩阵A,B初始化
+        self.A.weight.data.normal_(mean=0.0, std=0.02)
+        self.B.weight.data.zero_()
+
+        self.rank = rank
+    def forward(self, x):
+        return self.B(self.A(x))
+def apply_lora(model, rank=8):
+    for name, module in model.named_modules():
+        if module.isinstance(nn.Linear) and module.weight.shape[0] == module.weight.shape[1]:
+            lora = LoRA(module.weight.shape[0], module.weight.shape[1], rank).to(model.device)
+            module.setattr("lora", lora)
+            origin_forward = module.forward
+            def forward_with_lora(x, layer1=origin_forward, layer2=lora):
+                return origin_forward(x) + lora(x)
+            module.forward = forward_with_lora
+def load_model(model, path):
+    state_dict = torch.load(path, map_location=model.device)
+    state_dict = {(k[7:] if k.startswith("module.") else k) : v for k, v in state_dict.items()}
+    for name, module in model.named_modules():
+        if hasattr(module, "lora"):
+            lora_state = {k.replace(f"{name}.lora", "") :v for k, v in state_dict.items() if f"{name}.lora" in k}
+            module.lora.load_state_dict(lora_state)
+def save_model(model, path):
+    raw_model = getattr(model, "_orig_mod", model)
+    state_dict = {}
+    for name, module in raw_model.named_modules():
+        clean_name = name[7:] if name.startswith("module.") else name
+        if hasattr(module, "lora"):
+            lora_state = {f"{clean_name}.lora.{k}": v for k, v in module.lora.state_dict().items()}
+            state_dict.update(lora_state)
+    torch.save(state_dict, path)
+
+
