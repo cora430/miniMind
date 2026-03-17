@@ -1,0 +1,14 @@
+# 忽略所有 dataset 目录下的文件
+dataset/*
+
+# 但是，不要忽略 lm_dataset.py (这就是你要的效果)
+!dataset/lm_dataset.py
+
+# 另外建议忽略大文件和缓存
+checkpoints/
+out/
+__pycache__/
+*.pth
+*.bin
+*.jsonl
+.DS_Store
