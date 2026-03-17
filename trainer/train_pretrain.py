@@ -99,7 +99,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="Transformer层数")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1])
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用wandb")
+
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
