@@ -267,7 +267,7 @@ class MoEFeedForward(nn.Module):
             y = (y.reshape(bsz*seq_len, topk, hidden_dim) * topk_weight.unsqueeze(-1)).sum(1)
         else:
             y = self.moe_infer(identity.view(-1, hidden_dim), flat_topk_idx, topk_weight.view(-1, 1))
-        y = y.view(orig_shape)
+        y = y.view(**orig_shape)
         if self.config.n_shared_experts > 0:
             for expert in self.shared_experts:
                 y = y + expert(identity)
