@@ -323,8 +323,9 @@ class MiniMindBlock(nn.Module):
                 past_key_value: Optional[tuple[torch.Tensor, torch.tensor]] = None,
                 cis: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
                 attention_mask: Optional[torch.tensor] = None, ):
-        
-        hidden_states, past_kv = self.attn(self.input_layernorm(hidden_states), use_cache, past_key_value, cis, attention_mask)
+        residual = hidden_states
+        attn_out, past_kv = self.attn(self.input_layernorm(hidden_states), use_cache, past_key_value, cis, attention_mask)
+        hidden_states = attn_out + residual
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states, past_kv
     
