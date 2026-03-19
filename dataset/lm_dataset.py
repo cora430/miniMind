@@ -80,6 +80,8 @@ class SFTDataset(Dataset):
         return labels
     def __getitem__(self, index):
         conversations = self.samples[index]["conversations"]
+        print(type(conversations))
+        print(conversations)
         conversations = pre_processing_chat(conversations)
         prompt = self.create_chat_prompt(conversations)
         prompt = post_processing_chat(prompt)
