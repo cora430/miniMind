@@ -65,22 +65,40 @@ class SFTDataset(Dataset):
     def create_chat_prompt(self, conversions):
         tools = conversions[0].get("functions", None) if (conversions and conversions[0]["role"] == "system") else None
         return self.tokenizer.apply_chat_template(conversions, tokenize=False, add_generation_prompt=False, tools=tools)
-    def generate_labels(self, input_ids):
+    def generate_labels(self, prompt, input_ids):
         labels = [-100] * len(input_ids)
-        i = 0
-        while i < len(input_ids):
-            if input_ids[i:i+len(self.bos_id)] == self.bos_id:
-                start = i + len(self.bos_id)
-                end = start
-                while end < len(input_ids):
-                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
-                        break
-                    end += 1
-                for j in range(start, min(end+len(self.eos_id), len(input_ids))):
-                    labels[j] = input_ids[j]
-                i = min(end+len(self.eos_id), len(input_ids))
-            else:
-                i += 1
+
+        # 🔥 用字符串找 assistant 起点（稳定）
+        assistant_tag = "<|im_start|>assistant\n"
+        end_tag = "<|im_end|>\n"
+
+        start_pos = 0
+
+        while True:
+            # 找 assistant 起点
+            start_idx = prompt.find(assistant_tag, start_pos)
+            if start_idx == -1:
+                break
+
+            # 找结束
+            end_idx = prompt.find(end_tag, start_idx)
+            if end_idx == -1:
+                break
+
+            end_idx += len(end_tag)
+
+            # 🔥 转成 token 位置
+            prefix_ids = self.tokenizer(prompt[:start_idx]).input_ids
+            target_ids = self.tokenizer(prompt[start_idx:end_idx]).input_ids
+
+            start_token = len(prefix_ids)
+            end_token = min(start_token + len(target_ids), len(input_ids))
+
+            # 写 labels
+            for i in range(start_token, end_token):
+                labels[i] = input_ids[i]
+
+            start_pos = end_idx
 
         return labels
     def __getitem__(self, index):
@@ -95,8 +113,8 @@ class SFTDataset(Dataset):
         prompt = post_processing_chat(prompt)
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         input_ids = input_ids + [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
-        labels = self.generate_labels(input_ids)
-        print("labels:" + str(sum([1 for x in labels if x != -100])))
+        labels = self.generate_labels(prompt, input_ids)
+        # print("labels:" + str(sum([1 for x in labels if x != -100])))
         for i in range(len(input_ids)):
             if input_ids[i] == self.tokenizer.pad_token_id:
                 labels[i] = -100
