@@ -174,8 +174,8 @@ if __name__ == "__main__":
         setup_seed(42 + epoch)
         indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
-        sampler = SkipBatchSampler(sampler or indices, args.batch_size, skip_batches=skip)
-        loader = DataLoader(train_ds, sampler=sampler, num_workers=args.num_workers, pin_memory=True)
+        batch_sampler  = SkipBatchSampler(sampler or indices, args.batch_size, skip_batches=skip)
+        loader = DataLoader(train_ds, sampler=batch_sampler , num_workers=args.num_workers, pin_memory=True)
         Logger(f"{epoch + 1}/{args.epochs}  跳过前{skip}个batch, 从{skip}开始")
         train_epoch(epoch, loader, len(loader)+skip, lora_params, skip, wandb=wandb)
     if dist.is_initialized(): dist.destroy_process_group()
