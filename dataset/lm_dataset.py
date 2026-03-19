@@ -96,6 +96,7 @@ class SFTDataset(Dataset):
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         input_ids = input_ids + [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
         labels = self.generate_labels(input_ids)
+        print("labels:" + sum([1 for x in labels if x != -100]))
         for i in range(len(input_ids)):
             if input_ids[i] == self.tokenizer.pad_token_id:
                 labels[i] = -100
