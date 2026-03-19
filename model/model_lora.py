@@ -16,7 +16,7 @@ class LoRA(nn.Module):
         return self.B(self.A(x))
 def apply_lora(model, rank=8):
     for name, module in model.named_modules():
-        if module.isinstance(nn.Linear) and module.weight.shape[0] == module.weight.shape[1]:
+        if isinstance(module, nn.Linear) and module.weight.shape[0] == module.weight.shape[1]:
             lora = LoRA(module.weight.shape[0], module.weight.shape[1], rank).to(model.device)
             module.setattr("lora", lora)
             origin_forward = module.forward
