@@ -24,6 +24,11 @@ def pre_processing_chat(conversations, add_system_ratio=0.2):
         if random.random() < add_system_ratio:
             return [{"role": "system", "content": random.choice(SYSTEM_PROMPTS)}] + conversations    
     return conversations
+def normalize_conversations(conversations):
+    # 防止多套一层 list
+    while isinstance(conversations, list) and len(conversations) > 0 and isinstance(conversations[0], list):
+        conversations = conversations[0]
+    return conversations
 def post_processing_chat(prompt_content, empty_think_ratio=0.05):
     if '<think>\n\n</think>\n\n' in prompt_content and random.random() > empty_think_ratio:
         prompt_content = prompt_content.replace('<think>\n\n</think>\n\n', "")
@@ -80,6 +85,7 @@ class SFTDataset(Dataset):
         return labels
     def __getitem__(self, index):
         conversations = self.samples[index]["conversations"]
+        conversations = normalize_conversations(conversations)
         conversations = pre_processing_chat(conversations)
         prompt = self.create_chat_prompt(conversations)
         prompt = post_processing_chat(prompt)
