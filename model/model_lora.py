@@ -21,16 +21,16 @@ def apply_lora(model, rank=8):
             module.setattr("lora", lora)
             origin_forward = module.forward
             def forward_with_lora(x, layer1=origin_forward, layer2=lora):
-                return origin_forward(x) + lora(x)
+                return layer1(x) + layer2(x)
             module.forward = forward_with_lora
-def load_model(model, path):
+def load_lora(model, path):
     state_dict = torch.load(path, map_location=model.device)
     state_dict = {(k[7:] if k.startswith("module.") else k) : v for k, v in state_dict.items()}
     for name, module in model.named_modules():
         if hasattr(module, "lora"):
             lora_state = {k.replace(f"{name}.lora", "") :v for k, v in state_dict.items() if f"{name}.lora" in k}
             module.lora.load_state_dict(lora_state)
-def save_model(model, path):
+def save_lora(model, path):
     raw_model = getattr(model, "_orig_mod", model)
     state_dict = {}
     for name, module in raw_model.named_modules():

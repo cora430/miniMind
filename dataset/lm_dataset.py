@@ -85,6 +85,10 @@ class SFTDataset(Dataset):
         return labels
     def __getitem__(self, index):
         conversations = self.samples[index]["conversations"]
+        # {"conversations": [
+        # [ {...}, {...} ],
+        # [ {...}, {...} ]
+        # ]}  异常样本
         conversations = normalize_conversations(conversations)
         conversations = pre_processing_chat(conversations)
         prompt = self.create_chat_prompt(conversations)
