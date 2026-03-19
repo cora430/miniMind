@@ -72,7 +72,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         wandb_id = None
         if wandb is not None:
             if hasattr(wandb, "get_run"):
-                run = wandb.get_run
+                run = wandb.get_run()
                 wandb_id = getattr(run, "id", None)
             else:
                 wandb_id = getattr(wandb, "id", None)

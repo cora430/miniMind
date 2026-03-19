@@ -98,6 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Full-SFT", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
+    parser.add_argument("--wandb_id", type=str,  help="wandb_id")
     args = parser.parse_args()
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -122,7 +123,7 @@ if __name__ == "__main__":
         wandb_id = ckp_data["wandb_id"] if ckp_data is not None else None
         run_name = f"MiniMind Pretrained epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
         resume = "must" if args.from_resume == 1 else None
-        wandb.init(project=args.wandb_project, experiment_name=run_name, id=wandb_id, resume=resume, config=lm_config.to_dict())
+        wandb.init(project=args.wandb_project, experiment_name=run_name, id=args.wandb_id or wandb_id, resume=resume, config=lm_config.to_dict())
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
     if args.use_compile ==1:
