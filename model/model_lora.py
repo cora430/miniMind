@@ -24,12 +24,31 @@ def apply_lora(model, rank=8):
                 return layer1(x) + layer2(x)
             module.forward = forward_with_lora
 def load_lora(model, path):
-    state_dict = torch.load(path, map_location=model.device)
+    # 1. 加载权重到模型所在设备
+    state_dict = torch.load(path, map_location=next(model.parameters()).device)
+    
+    # 2. 移除 DDP 包装产生的 "module." 前缀
     state_dict = {(k[7:] if k.startswith("module.") else k) : v for k, v in state_dict.items()}
+    
+    # 3. 遍历模型模块进行精准匹配
     for name, module in model.named_modules():
         if hasattr(module, "lora"):
-            lora_state = {k.replace(f"{name}.lora", "") :v for k, v in state_dict.items() if f"{name}.lora" in k}
-            module.lora.load_state_dict(lora_state)
+            # 这里的改进点：使用 strip('.') 彻底清除 key 前后多余的点
+            # 并且增加对 key 的校验，防止误匹配
+            target_prefix = f"{name}.lora"
+            
+            lora_state = {}
+            for k, v in state_dict.items():
+                if k.startswith(target_prefix):
+                    # 替换前缀，并去除可能残留在开头的 "."
+                    new_key = k.replace(target_prefix, "").lstrip('.')
+                    lora_state[new_key] = v
+            
+            # 4. 加载到子模块中
+            if lora_state:
+                module.lora.load_state_dict(lora_state, strict=True)
+                
+    print(f"✅ LoRA 权重已成功从 {path} 加载")
 def save_lora(model, path):
     raw_model = getattr(model, "_orig_mod", model)
     state_dict = {}

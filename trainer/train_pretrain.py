@@ -138,7 +138,7 @@ if __name__ == "__main__":
     if args.use_wandb and is_main_process():
         import swanlab as wandb
         wandb_id = ckp_data["wandb_id"] if ckp_data is not None else None
-        run_name = f"MiniMind Pretrained epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
+        run_name = f"MiniMind lora epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
         resume = "must" if wandb_id is not None else None
         wandb.init(project=args.wandb_project, experiment_name=run_name, id=wandb_id, resume=resume, config=lm_config.to_dict())
 
@@ -178,7 +178,7 @@ if __name__ == "__main__":
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip_batches=skip)
         loader = DataLoader(dataset=train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        Logger(f"epoch : {epoch}/{args.epochs}   跳过前{skip}个， 从{skip}开始")
+        if epoch == start_epoch: Logger(f"epoch : {epoch}/{args.epochs}   跳过前{skip}个， 从{skip}开始")
         train_epoch(epoch, loader, len(loader) + skip, skip, wandb)
 
     # ========== 9. 清理分布进程 ==========
