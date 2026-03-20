@@ -354,8 +354,8 @@ class MiniMindBlock(nn.Module):
         hidden_states = attn_out + residual
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         # 记录当前层的 aux_loss
-        current_aux_loss = self.mlp.aux_loss if hasattr(self.mlp, 'aux_loss') else 0
-        return hidden_states, past_kv, current_aux_loss
+        #current_aux_loss = self.mlp.aux_loss if hasattr(self.mlp, 'aux_loss') else 0
+        return hidden_states, past_kv
     
 
 
