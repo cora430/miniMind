@@ -213,8 +213,8 @@ class MoEGate(nn.Module):
         else:
             raise NotImplementedError(f"insupportable scoring function for MoE gating:{self.scoring_func}")
         topk_weight, topk_idx = torch.topk(scores, k=self.topk, dim=-1, sorted=False)
-        print(scores.mean(0))
-        print(torch.bincount(topk_idx.view(-1)))
+        # print(scores.mean(0))
+        # print(torch.bincount(topk_idx.view(-1)))
         # topk_weight, topk_idx -> bsz*seq_len topk
         if self.norm_topk_prob and self.topk > 1:
             topk_weight = topk_weight / (topk_weight.sum(-1, keepdim=True) + 1e-20)
