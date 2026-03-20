@@ -85,9 +85,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind LoRA Fine-tuning")
     parser.add_argument("--save_dir", type=str, default="/root/autodl-tmp/miniMind/out/lora", help="模型保存目录")
     parser.add_argument("--lora_name", type=str, default="lora_identity", help="LoRA权重名称(如lora_identity/lora_medical等)")
-    parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
+    parser.add_argument("--epochs", type=int, default=5, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="初始学习率")
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="初始学习率")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
@@ -127,7 +127,7 @@ if __name__ == "__main__":
     if args.use_wandb:
         import swanlab as wandb
         wandb_id = ckp_data["wandb_id"] if ckp_data is not None else None
-        run_name = f"MiniMind Pretrained epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
+        run_name = f"MiniMind lora epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
         resume = "must" if args.from_resume == 1 else None
         wandb.init(project=args.wandb_project, experiment_name=run_name, id=wandb_id, resume=resume, config=lm_config.to_dict())
     # ========== 5. 定义模型、数据、优化器 ==========
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     train_ds = SFTDataset(args.data_path, tokenizer, args.max_seq_len)
     sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.amp.GradScaler(device=device_type, enabled=(args.dtype == 'float16'))
-    optimizer = torch.optim.AdamW(lora_params, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(lora_params, lr=args.learning_rate, weight_decay=0.1)
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data is not None:
