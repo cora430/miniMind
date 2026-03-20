@@ -142,7 +142,7 @@ if __name__ == "__main__":
     if args.use_wandb and is_main_process():
         import swanlab as wandb
         wandb_id = ckp_data["wandb_id"] if ckp_data is not None else None
-        run_name = f"MiniMind lora epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
+        run_name = f"MiniMind pretrain epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
         resume = "must" if wandb_id is not None else None
         wandb.init(project=args.wandb_project, experiment_name=run_name, id=wandb_id, resume=resume, config=lm_config.to_dict())
 
