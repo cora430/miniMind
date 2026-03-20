@@ -289,26 +289,48 @@ class MoEFeedForward(nn.Module):
         返回:
         - expert_cache: 加权后的专家输出，(num_tokens, hidden_size)
         """
+        # 1. 对专家索引进行排序，将相同专家的 token 聚合在一起
         idxs = torch.argsort(flat_expert_indices) 
-        # idxs中的每一个值是一个专家在num_tokens*num_experts_per_tok中的索引
-        token_ids = idxs // self.config.num_experts_per_tokens
-        # token_ids中的每一个值是一个专家在num_tokens中的索引
-        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
-        # tokens_per_expert中的每一个值是一个专家处理的tokens数量，当做索引下标用的话是基于num_tokens*num_experts_per_tok
-        experts_cache = torch.empty_like(x, device=x.device)
+        
+        # 2. 核心修复：强制 bincount 长度为专家总数，防止 IndexError
+        counts = torch.bincount(flat_expert_indices, minlength=len(self.experts))
+        tokens_per_expert = counts.cpu().numpy().cumsum(0)
+        
+        # 3. 映射回原始 token 索引
+        num_tokens = x.shape[0]
+        topk = self.config.num_experts_per_tokens
+        # 建立映射：每个推理位置对应原始输入 x 的哪个 token
+        orig_token_map = torch.arange(num_tokens, device=x.device).repeat_interleave(topk)
+        token_ids = orig_token_map[idxs]
+
+        experts_cache = torch.zeros_like(x, device=x.device)
+        
         for i, expert in enumerate(self.experts):
-            
             end = tokens_per_expert[i]
             start = tokens_per_expert[i-1] if i != 0 else 0
+            
+            # 如果该专家没有被选中，直接跳过，避免 start == end 导致切片为空
+            if start == end:
+                continue
+                
+            # 找到当前专家需要处理的原始 token 索引
             tokens_input_ids = token_ids[start:end]
             x_input = x[tokens_input_ids]
-            expert_output= expert(x_input)
+            
+            # 专家前向计算
+            expert_output = expert(x_input)
+            
+            # 乘以对应的 Gate 权重
+            # idxs[start:end] 获取了这些 token 在展平后的权重数组中的原始位置
             expert_output.mul_(flat_expert_weights[idxs[start:end]])
+            
+            # 使用 scatter_add 将结果累加回缓存中对应的 token 位置
             experts_cache.scatter_add_(
                 dim=0,
-                index=tokens_input_ids.view(-1, 1).repeat(1, x.shape[-1]),
+                index=tokens_input_ids.view(-1, 1).expand(-1, x.shape[-1]),
                 src=expert_output
             )
+            
         return experts_cache
   
 class MiniMindBlock(nn.Module):
