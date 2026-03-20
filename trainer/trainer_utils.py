@@ -100,6 +100,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
             Logger(f"没找到{resume_path}. Initializing from scratch.")
             return None
         # 根据resume_path把resume_data拿出来，注意step
+        Logger(f"从 {resume_path} 加载数据")
         resume_data = torch.load(resume_path, map_location="cpu")
         old_world_size = resume_data["world_size"]
         current_world_size = dist.get_world_size() if dist.is_initialized() else 1
