@@ -125,7 +125,7 @@ if __name__ == "__main__":
     if args.use_wandb:
         import swanlab as wandb
         wandb_id = ckp_data["wandb_id"] if ckp_data is not None else None
-        run_name = f"MiniMind Pretrained epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
+        run_name = f"MiniMind SFT epoches : {args.epochs} - batch_size : {args.batch_size} - learning_rate : {args.learning_rate} - use_moe: {args.use_moe}"
         resume = "must" if args.from_resume == 1 else None
         wandb.init(project=args.wandb_project, experiment_name=run_name, id=args.wandb_id or wandb_id, resume=resume, config=lm_config.to_dict())
     # ========== 5. 定义模型、数据、优化器 ==========
