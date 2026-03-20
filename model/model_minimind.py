@@ -252,10 +252,11 @@ class MoEFeedForward(nn.Module):
         topk_weight, topk_idx, aux_loss = self.gate(identity)
         # topk_weight, topk_idx -> bsz*seq_len topk
         topk = self.config.num_experts_per_tokens
+        flat_topk_idx = topk_idx.view(-1)# bsz*seq_len*topk
         if self.training:
             x = x.repeat_interleave(topk, dim=0)# bsz*seq_len*topk, hidden_dim
             y = torch.empty_like(x, device=x.device, dtype=x.dtype)
-            flat_topk_idx = topk_idx.view(-1) # bsz*seq_len*topk
+            
             for i, expert in enumerate(self.experts):  
                 mask = flat_topk_idx == i # bsz*seq_len*topk
                 if mask.sum() > 0:
@@ -266,6 +267,7 @@ class MoEFeedForward(nn.Module):
                     y[mask] = expert(x.new_zeros(0, hidden_dim)).to(y.dtype) + 0 * sum(p.sum() for p in expert.parameters())
             y = (y.reshape(bsz*seq_len, topk, hidden_dim) * topk_weight.unsqueeze(-1)).sum(1)
         else:
+            
             y = self.moe_infer(identity.view(-1, hidden_dim), flat_topk_idx, topk_weight.view(-1, 1))
         y = y.view(orig_shape)
         if self.config.n_shared_experts > 0:
