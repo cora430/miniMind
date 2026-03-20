@@ -36,7 +36,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             param_group["lr"] = lr
         with autocast_ctx:
             res = model(input_ids=input_ids, labels=labels)
-            loss = res.loss + res.aux_loss
+            loss = res.loss 
             loss = loss / args.accumulation_steps
         scaler.scale(loss).backward()
         if (step + 1) % args.accumulation_steps == 0:
@@ -49,20 +49,24 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         if (step + 1) % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             eta_min = spend_time / steps_done_this_run * (iters - step - 1) // 60
-            current_loss = loss.item() * args.accumulation_steps
-            current_logits_loss = res.loss.item()
+            # 1. 当前总损失 (已经包含 aux)
+            current_total_loss = res.loss.item() 
+            # 2. 辅助损失
             current_aux_loss = res.aux_loss.item()
+            # 3. 纯 Logits 损失 (总减去辅助)
+            current_logits_loss = current_total_loss - current_aux_loss
+            
             Logger(
                 f"Epoch:[{epoch + 1}/{args.epochs}]({step + 1}/{iters}),"
-                f"loss: {current_loss:.4f},"
-                f"logits loss:{current_logits_loss:.4f},"
-                f"aux loss:{current_aux_loss:.4f},"
+                f"Total Loss: {current_total_loss:.4f}," # 改名区分，更清晰
+                f"Logits Loss:{current_logits_loss:.4f},"
+                f"Aux Loss:{current_aux_loss:.4f},"
                 f"lr:{lr:.8f},"
                 f"eta min:{eta_min:.1f}"
             )
             if wandb:
                 wandb.log({
-                    "loss":current_loss,
+                    "loss":current_total_loss,
                     "logits_loss":current_logits_loss,
                     "aux_loss":current_aux_loss,
                     "learning_rate":lr,

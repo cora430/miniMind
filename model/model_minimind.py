@@ -213,6 +213,8 @@ class MoEGate(nn.Module):
         else:
             raise NotImplementedError(f"insupportable scoring function for MoE gating:{self.scoring_func}")
         topk_weight, topk_idx = torch.topk(scores, k=self.topk, dim=-1, sorted=False)
+        print(scores.mean(0))
+        print(torch.bincount(topk_idx.view(-1)))
         # topk_weight, topk_idx -> bsz*seq_len topk
         if self.norm_topk_prob and self.topk > 1:
             topk_weight = topk_weight / (topk_weight.sum(-1, keepdim=True) + 1e-20)
@@ -351,8 +353,12 @@ class MiniMindBlock(nn.Module):
         attn_out, past_kv = self.attn(self.input_layernorm(hidden_states), use_cache, past_key_value, cis, attention_mask)
         hidden_states = attn_out + residual
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
-        return hidden_states, past_kv
+        # 记录当前层的 aux_loss
+        current_aux_loss = self.mlp.aux_loss if hasattr(self.mlp, 'aux_loss') else 0
+        return hidden_states, past_kv, current_aux_loss
     
+
+
 class MiniMindModel(nn.Module):
     def __init__(self, config: MiniMindConfig):
         super().__init__()
@@ -361,74 +367,112 @@ class MiniMindModel(nn.Module):
         self.embd_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.layers = nn.ModuleList([MiniMindBlock(i, config) for i in range(config.num_hidden_layers)])
+        
         self.head_dim = config.hidden_size // config.num_attention_heads
-        freqs_cos, freqs_sin = precompute_freqs_cis(self.head_dim, config.max_position_embeddings, config.rope_theta, config.rope_scaling)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            self.head_dim, config.max_position_embeddings, config.rope_theta, config.rope_scaling
+        )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
     def forward(self,
-                input_ids: Optional[torch.Tensor]=None,
-                use_cache: bool = False, 
-                past_key_values: Optional[List[tuple[torch.Tensor, torch.tensor]]] = None,
-                attention_mask: Optional[torch.tensor] = None, 
+                input_ids: Optional[torch.Tensor] = None,
+                use_cache: bool = False,
+                past_key_values: Optional[List[tuple[torch.Tensor, torch.Tensor]]] = None,
+                attention_mask: Optional[torch.Tensor] = None,
                 **kwargs):
         batch_size, seq_len = input_ids.shape
         if hasattr(past_key_values, "layers"): past_key_values = None
         past_key_values = past_key_values or [None] * self.config.num_hidden_layers
+        
+        # 计算 RoPE 的起始位置
         start = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         cis = (
             self.freqs_cos[start : start + seq_len],
             self.freqs_sin[start : start + seq_len]
-            
         )
+        
         hidden_states = self.dropout(self.embd_tokens(input_ids))
+        
         presents = []
-        for i , (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):
-            hidden_states, past_kv = layer(hidden_states, use_cache, past_key_value, cis, attention_mask)
+        # 初始化 aux_loss，确保其具有梯度追踪能力
+        total_aux_loss = hidden_states.new_zeros(1).squeeze()
+        
+        for i, (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):
+            # 假设你的 MiniMindBlock forward 已经修改为返回 (hidden_states, past_kv, l_aux)
+            # 或者依然通过 layer.mlp.aux_loss 获取
+            hidden_states, past_kv = layer(
+                hidden_states, use_cache, past_key_value, cis, attention_mask
+            )
             presents.append(past_kv)
+            
+            # 每一层如果使用了 MoE，累加其负载均衡损失
+            if self.config.use_moe and hasattr(layer.mlp, 'aux_loss'):
+                total_aux_loss = total_aux_loss + layer.mlp.aux_loss
+                
         hidden_states = self.norm(hidden_states)
-        aux_loss = sum([layer.mlp.aux_loss for layer in self.layers if isinstance(layer.mlp, MoEFeedForward)], hidden_states.new_zeros(1).squeeze())
-        return hidden_states, presents, aux_loss
+        
+        return hidden_states, presents, total_aux_loss
+
 class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = MiniMindConfig
+
     def __init__(self, config: MiniMindConfig = None):
         self.config = config or MiniMindConfig()
         super().__init__(self.config)
         self.model = MiniMindModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
+        # 权重共享
         self.model.embd_tokens.weight = self.lm_head.weight
-    def forward(self, 
-                input_ids: Optional[torch.Tensor]=None,
-                use_cache: bool = False, 
-                past_key_values: Optional[List[tuple[torch.Tensor, torch.tensor]]] = None,
-                attention_mask: Optional[torch.tensor] = None, 
+
+    def forward(self,
+                input_ids: Optional[torch.Tensor] = None,
+                use_cache: bool = False,
+                past_key_values: Optional[List[tuple[torch.Tensor, torch.Tensor]]] = None,
+                attention_mask: Optional[torch.Tensor] = None,
                 labels: Optional[torch.Tensor] = None,
                 logits_to_keep: Optional[Union[int, torch.Tensor]] = 0,
                 **kwargs):
+        
+        # 1. 前向传播获取隐藏状态和 MoE 辅助损失
         hidden_states, past_key_values, aux_loss = self.model(
             input_ids, use_cache, past_key_values, attention_mask, **kwargs
         )
+        
+        # 2. 计算 Logits
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
-        # 3. 损失计算（核心修正部分）
+        
         loss = None
         if labels is not None:
-            # 标准的 Causal LM 训练逻辑：
-            # Input:  [A, B, C, D]
-            # Target: [B, C, D, E]
-            # 所以 Logits 丢掉最后一个，Labels 丢掉第一个，实现错位对齐
+            # 3. 计算交叉熵损失 (Token Prediction Loss)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
             
-            # 展平以计算 CrossEntropy
-            # ignore_index=-100 是 PyTorch 默认的忽略索引，通常用于 Padding 部分
-            loss = F.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size), 
-                shift_labels.view(-1), 
+            logits_loss = F.cross_entropy(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1),
                 ignore_index=-100
             )
-        output = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
+            
+            # 4. 【核心修复】将 aux_loss 合并到主 loss 中，否则 aux_loss 不会产生梯度
+            # 这样 Gate 权重才会根据负载均衡情况进行更新
+            loss = logits_loss + aux_loss
+        else:
+            # 推理阶段不需要 loss
+            loss = None
+
+        # 5. 封装输出，确保包含合并后的 loss
+        output = CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=past_key_values,
+            hidden_states=hidden_states
+        )
+        
+        # 记录原始的 aux_loss 方便日志打点
         output.aux_loss = aux_loss
+        
         return output
 
         
