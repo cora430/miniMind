@@ -1,3 +1,5 @@
+from textwrap import indent
+
 import torch
 import torch.nn as nn
 from transformers import GenerationMixin, PreTrainedModel, PretrainedConfig
@@ -222,7 +224,8 @@ class MoEGate(nn.Module):
             topk_idx_for_aux = topk_idx.view(bsz, -1) # bsz seq_len*topk
             if self.seq_aux:
                 ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device)
-                ce.scatter_add_(1, topk_idx_for_aux, torch.ones(bsz, seq_len*self.topk, device=hidden_states.device)).div_(seq_len*self.topk/self.n_routed_experts)
+                # src 和 index 的维度是一样的，要把 src[0][0] 里的 1 加到 self[0][index[0][0]]，那这样 self 里的就是每个句子每个专家的启用数量
+                ce.scatter_add_(dim=1, index=topk_idx_for_aux, src=torch.ones(bsz, seq_len*self.topk, device=hidden_states.device)).div_(seq_len*self.topk/self.n_routed_experts)
                 aux_loss = (ce * scores.reshape(bsz, seq_len, self.n_routed_experts).mean(dim=1)).sum(dim=1).mean() * self.alpha
             else:
                 mask_ce = F.one_hot(topk_idx_for_aux.view(-1), num_classes=self.n_routed_experts,)
@@ -295,7 +298,10 @@ class MoEFeedForward(nn.Module):
         idxs = torch.argsort(flat_expert_indices) 
         
         # 2. 核心修复：强制 bincount 长度为专家总数，防止 IndexError
-        counts = torch.bincount(flat_expert_indices, minlength=len(self.experts))
+        # 这里bincount只能 input 为 1D，统计在所句子里每个专家的使用次数，minlength 保证输出长度为为专家总数
+        # ce = torch.zeros(len(self.experts))
+        # ce.scatter_add_(dim=0, index=flat_expert_indices, src=torch.ones_like(flat_expert_indices)).float()
+        counts = torch.bincount(input=flat_expert_indices, minlength=len(self.experts))
         tokens_per_expert = counts.cpu().numpy().cumsum(0)
         
         # 3. 映射回原始 token 索引
@@ -303,7 +309,7 @@ class MoEFeedForward(nn.Module):
         topk = self.config.num_experts_per_tokens
         # 建立映射：每个推理位置对应原始输入 x 的哪个 token
         orig_token_map = torch.arange(num_tokens, device=x.device).repeat_interleave(topk)
-        token_ids = orig_token_map[idxs]
+        token_ids = orig_token_map[idxs] # 这里token_ids 是按照相同专家排序的token id
 
         experts_cache = torch.zeros_like(x, device=x.device)
         
