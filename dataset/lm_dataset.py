@@ -56,16 +56,18 @@ class PretrainDataset(Dataset):
 class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024):
         super().__init__()
-        # --- 最小修改点 1: 强制指定缓存到大容量盘，避免根目录溢出 ---
-        cache_dir = os.path.join(os.path.dirname(jsonl_path), "hf_cache")
+        # 1. 强制指定缓存路径到大容量的 autodl-tmp 目录下，防止根目录 29G 空间溢出
+        import os
+        cache_dir = "/root/autodl-tmp/hf_cache"
         os.makedirs(cache_dir, exist_ok=True)
-        
-        # --- 最小修改点 2: 使用 ignore_verifications (或 on_error) 增加鲁棒性 ---
+
+        # 2. 增加 ignore_verifications 和更改缓存路径
+        # 如果数据量巨大且报错，这是最稳妥的加载方式
         self.samples = load_dataset(
             "json", 
             data_files=jsonl_path, 
             split="train",
-            cache_dir=cache_dir  # 确保生成的 .arrow 文件在大盘上
+            cache_dir=cache_dir
         )
         self.tokenizer = tokenizer
         self.max_length = max_length
