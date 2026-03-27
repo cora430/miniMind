@@ -56,19 +56,26 @@ class PretrainDataset(Dataset):
 class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024):
         super().__init__()
-        # 1. 强制指定缓存路径到大容量的 autodl-tmp 目录下，防止根目录 29G 空间溢出
-        import os
-        cache_dir = "/root/autodl-tmp/hf_cache"
-        os.makedirs(cache_dir, exist_ok=True)
+        import json
+        
+        self.samples = []
+        print(f"📦 正在加载并过滤数据: {jsonl_path}")
+        
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                
+                try:
+                    data = json.loads(line)
+                    # 🔥 核心过滤逻辑：确保 conversations 存在且每个 content 都不为空
+                    convs = data.get("conversations", [])
+                    if convs and all(msg.get("content", "").strip() for msg in convs):
+                        self.samples.append(data)
+                except Exception:
+                    continue # 跳过彻底损坏的 JSON 行
 
-        # 2. 增加 ignore_verifications 和更改缓存路径
-        # 如果数据量巨大且报错，这是最稳妥的加载方式
-        self.samples = load_dataset(
-            "json", 
-            data_files=jsonl_path, 
-            split="train",
-            cache_dir=cache_dir
-        )
+        print(f"✅ 加载完成！原始行数约 90万，过滤后有效样本: {len(self.samples)}")
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.bos_id = tokenizer(f"{tokenizer.bos_token}assistant\n", add_special_tokens=False).input_ids
