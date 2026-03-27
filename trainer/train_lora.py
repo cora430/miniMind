@@ -102,13 +102,13 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser.add_argument('--use_moe', action="store_true", help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument("--data_path", type=str, default="/root/autodl-tmp/miniMind/dataset/lora_identity.jsonl", help="LoRA训练数据路径")
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练，默认full_sft")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-LoRA", help="wandb项目名")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
+    parser.add_argument("--use_compile", action="store_true", help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(
         hidden_size=args.hidden_size,
-        use_moe=bool(args.use_moe),
+        use_moe=args.use_moe,
         num_hidden_layers=args.num_hidden_layers
     )
     ckp_data = lm_checkpoint(lm_config, weight=args.lora_name, save_dir='/root/autodl-tmp/miniMind/checkpoints') if args.from_resume == 1 else None
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, experiment_name=run_name, id=wandb_id, resume=resume, config=lm_config.to_dict())
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
-    if args.use_compile == 1:
+    if args.use_compile :
         model = torch.compile(model)
         Logger("torch.compile enabled")
     apply_lora(model=model)

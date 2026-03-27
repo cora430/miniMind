@@ -1,3 +1,4 @@
+from rich import padding
 from sympy import false
 from torch.utils.data import Dataset
 import os
@@ -120,6 +121,64 @@ class SFTDataset(Dataset):
                 labels[i] = -100
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
     
+class DPODataset(Dataset):
+    def __init__(self, jsonl_path, tokenizer, max_length=4096):
+        super().__init__()
+        self.samples = load_dataset("json", data_files=jsonl_path, split="train")
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+    def __len__(self):
+        return len(self.samples)
+    def generate_loss_mask(self, input_ids, prompt):
+        assistant_tag = "<|im_start|>assistant\n"
+        end_tag = "<|im_end|>\n"
+        mask = [0] * len(input_ids)
+        start_pos = 0
+        while True:
+            start_idx = prompt.find(assistant_tag, start_pos)
+            if start_idx == -1:
+                break
+            end_idx = prompt.find(end_tag, start_pos)
+            if end_idx == -1:
+                break
+            end_idx += len(end_tag)
+            prefix_ids = self.tokenizer(prompt[:start_idx]).input_ids
+            target_ids = self.tokenizer(prompt[start_idx:end_idx]).input_ids
+            start_token = len(prefix_ids)
+            end_token = min(start_token + len(target_ids), len(input_ids))
+            mask[start_token:end_token] = 1
+            start_pos = end_idx
+        return mask
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        chosen = sample['chosen']  # 是一个 list，里面包含若干 {role, content}
+        rejected = sample['rejected']  
+        chosen_prompt = self.tokenizer.apply_chat_template(chosen, tokenize=False, add_generation_prompt=False)
+        rejected_prompt = self.tokenizer.apply_chat_template(rejected, tokenize=False, add_generation_prompt=False)
+        chosen_prompt = post_processing_chat(chosen_prompt)
+        rejected_prompt = post_processing_chat(rejected_prompt)
+        chosen_encoding = self.tokenizer(chosen_prompt, truncation=True, max_length=self.max_length, padding="max_length")
+        rejected_encoding = self.tokenizer(rejected_prompt, truncation=True, max_length=self.max_length, padding="max_length")
+        chosen_ids = chosen_encoding.input_ids
+        rejected_ids = rejected_encoding.input_ids
+        chosen_mask = self.generate_loss_mask(chosen_ids, chosen_prompt)
+        rejected_mask = self.generate_loss_mask(rejected_ids, rejected_prompt)
+        x_chosen = torch.tensor(chosen_ids[:-1], dtype=torch.long)
+        y_chosen = torch.tensor(chosen_ids[1:], dtype=torch.long)
+        chosen_mask = torch.tensor(chosen_mask[1:], dtype=torch.long)
+        rejected_mask = torch.tensor(rejected_mask[1:], dtype=torch.long)
+        x_rejected = torch.tensor(rejected_ids[:-1], dtype=torch.long)
+        y_rejected = torch.tensor(rejected_ids[1:], dtype=torch.long)
+        return {
+            'x_chosen': x_chosen,
+            'y_chosen': y_chosen,
+            'mask_chosen': chosen_mask,
+            'x_rejected': x_rejected,
+            'y_rejected': y_rejected,
+            'mask_rejected': rejected_mask
+        }
+    
+
 
     
 
