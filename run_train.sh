@@ -127,6 +127,9 @@ echo ""
 # ==============================================================
 cd "$PROJECT_DIR"
 
+# 减少显存碎片，避免 OOM 时明明有空闲却分配失败
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # ==============================================================
 # Step 4: Pretrain（预训练）
 # 数据: pretrain_t2t_mini ~0.25B tokens × 5 epochs
@@ -138,9 +141,9 @@ python -m trainer.train_pretrain \
     --hidden_size 768 \
     --num_hidden_layers 8 \
     --epochs 5 \
-    --batch_size 64 \
+    --batch_size 32 \
     --learning_rate 5e-4 \
-    --accumulation_steps 4 \
+    --accumulation_steps 8 \
     --max_seq_len 512 \
     --data_path ./dataset/pretrain_t2t_mini.jsonl \
     --save_dir ./out \
