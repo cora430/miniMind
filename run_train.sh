@@ -27,15 +27,21 @@ echo "========== [1/5] 安装 Python 依赖 =========="
 CUDA_VER=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release \([0-9]*\.[0-9]*\).*/\1/' || echo "12.1")
 echo "检测到 CUDA 版本: $CUDA_VER"
 
-if [[ "$CUDA_VER" == "12.4" || "$CUDA_VER" == "12.5" || "$CUDA_VER" == "12.6" ]]; then
+CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
+CUDA_MINOR=$(echo "$CUDA_VER" | cut -d. -f2)
+if [[ "$CUDA_MAJOR" -ge 12 && "$CUDA_MINOR" -ge 8 ]]; then
+    TORCH_URL="https://download.pytorch.org/whl/cu128"
+elif [[ "$CUDA_MAJOR" -ge 12 && "$CUDA_MINOR" -ge 4 ]]; then
     TORCH_URL="https://download.pytorch.org/whl/cu124"
-elif [[ "$CUDA_VER" == "12.1" || "$CUDA_VER" == "12.2" || "$CUDA_VER" == "12.3" ]]; then
+elif [[ "$CUDA_MAJOR" -ge 12 ]]; then
     TORCH_URL="https://download.pytorch.org/whl/cu121"
 else
     TORCH_URL="https://download.pytorch.org/whl/cu118"
 fi
 
-pip install torch torchvision torchaudio --index-url "$TORCH_URL" -q
+# 镜像已预装 PyTorch，跳过重复安装可节省时间；若需强制安装取消注释
+# pip install torch==2.7.0 torchvision torchaudio --index-url "$TORCH_URL" -q
+echo "PyTorch wheel URL（如需重装）: $TORCH_URL"
 pip install modelscope -q
 pip install -r "$PROJECT_DIR/requirements.txt" -q
 echo "依赖安装完成"
