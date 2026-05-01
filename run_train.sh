@@ -147,7 +147,8 @@ python -m trainer.train_pretrain \
     --save_weight pretrain \
     --save_interval 2000 \
     --log_interval 200 \
-    --dtype bfloat16
+    --dtype bfloat16 \
+    $EXTRA_ARGS
 echo "Pretrain 完成"
 echo ""
 
@@ -172,7 +173,8 @@ python -m trainer.train_full_sft \
     --save_weight full_sft \
     --save_interval 1000 \
     --log_interval 100 \
-    --dtype bfloat16
+    --dtype bfloat16 \
+    $EXTRA_ARGS
 echo "Full SFT 完成"
 echo ""
 
@@ -196,7 +198,8 @@ python -m trainer.train_dpo \
     --save_interval 200 \
     --log_interval 50 \
     --beta 0.15 \
-    --dtype bfloat16
+    --dtype bfloat16 \
+    $EXTRA_ARGS
 echo "DPO 完成"
 echo ""
 
