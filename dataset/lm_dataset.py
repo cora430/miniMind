@@ -1,14 +1,15 @@
-from rich import padding
-from sympy import false
+from gc import enable
+
 from torch.utils.data import Dataset
 import os
 import torch
 import random
 from datasets import load_dataset
-from transformers.activations import FastGELUActivation
+import json
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def pre_processing_chat(conversations, add_system_ratio=0.2):
+    if any( conv.get("tool") for conv in conversations): return conversations
     SYSTEM_PROMPTS = [
         "你是一个知识丰富的AI，尽力为用户提供准确的信息。",
         "你是minimind，一个小巧但有用的语言模型。",
@@ -196,8 +197,65 @@ class DPODataset(Dataset):
             'y_rejected': y_rejected,
             'mask_rejected': rejected_mask
         }
+class RLAIFDataset(Dataset):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, thinking_ratio=0.5):
+        super().__init__()
+        self.samples = load_dataset('json', data_files=jsonl_path, split="train")
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.thinking_ratio = thinking_ratio
+    def __len__(self):
+        return len(self.samples)
+    def create_chat_template(self, conversations):
+        conversations = pre_processing_chat(conversations)
+        use_thinking = random.random() < self.thinking_ratio
+        prompt = self.tokenizer.apply_chat_template(
+            conversations[:-1],
+            tokenize=False,
+            open_thinking=use_thinking,
+            add_generation_prompt=True
+        )
+        return prompt
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        conversations = sample["conversations"]
+        prompt = self.create_chat_template(conversations)
+        answer = conversations[-1]["content"] if conversations else ""
+        return {
+            "prompt": prompt,
+            "answer": ""
+        }
     
+class AgentRLDataset(Dataset):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.samples = []
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                self.samples.append(json.loads(line.strip()))
+    def __len__(self):
+        return len(self.samples)
+    def parse_conversations(self, conversations):
+        messages = []
+        tools = None
+        for m in conversations:
+            m = dict(m)
+            if m.get("role") == "system" and m.get("tools"):
+                tools = json.loads(m["tools"]) if isinstance(m["tools"], str) else m["tools"]
+            messages.append(m)
+        return messages[:-1], tools
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        messages, tools = self.parse_conversations(sample["conversations"])
+        return{
+            "messages": messages,
+            "gt": sample["gt"],
+            "tools": tools
+        }
 
+        
 
     
 

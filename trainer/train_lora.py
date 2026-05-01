@@ -78,7 +78,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
             moe_suffix = "_moe" if lm_config.use_moe else ""
             lora_path  = f"{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth"
             save_lora(model, lora_path)
-            lm_checkpoint(lm_config, args.lora_name, model, optimizer, epoch, step, wandb, '/root/autodl-tmp/miniMind/checkpoints', scaler=scaler)
+            lm_checkpoint(lm_config, args.lora_name, model, optimizer, epoch, step, wandb, args.save_dir, scaler=scaler)
             model.train()
         del input_ids, labels, res, loss
 
@@ -87,7 +87,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind LoRA Fine-tuning")
-    parser.add_argument("--save_dir", type=str, default="/root/autodl-tmp/miniMind/out/lora", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default=None, help="模型保存目录（默认 <项目根>/out/lora）")
     parser.add_argument("--lora_name", type=str, default="lora_identity", help="LoRA权重名称(如lora_identity/lora_medical等)")
     parser.add_argument("--epochs", type=int, default=5, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
@@ -110,6 +110,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str, default="MiniMind-LoRA", help="wandb项目名")
     parser.add_argument("--use_compile", action="store_true", help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
+    if args.save_dir is None:
+        args.save_dir = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'out', 'lora')
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
     if dist.is_initialized(): args.device = f"cuda:{local_rank}"
@@ -121,7 +123,7 @@ if __name__ == "__main__":
         use_moe=args.use_moe,
         num_hidden_layers=args.num_hidden_layers
     )
-    ckp_data = lm_checkpoint(lm_config, weight=args.lora_name, save_dir='/root/autodl-tmp/miniMind/checkpoints') if args.from_resume == 1 else None
+    ckp_data = lm_checkpoint(lm_config, weight=args.lora_name, save_dir=args.save_dir) if args.from_resume == 1 else None
     # ========== 3. 设置混合精度 ==========
     dtype = torch.bfloat16 if args.dtype == 'bfloat16' else torch.float16
     device_type =  "cuda" if "cuda" in args.device else "cpu"

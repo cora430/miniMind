@@ -1,12 +1,14 @@
 import math
 import os
 from sympy import is_increasing
-import torch 
+import torch
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 import random
 import numpy as np
 from pathlib import Path
 import torch.distributed as dist
-from transformers import AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
 from model.model_minimind import MiniMindForCausalLM
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
@@ -40,7 +42,11 @@ def Logger(content):
     if is_main_process():
         print(content)
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='/root/autodl-tmp/miniMind/model', save_dir='/root/autodl-tmp/miniMind/checkpoints', device='cuda'):
+def init_model(lm_config, from_weight='pretrain', tokenizer_path=None, save_dir=None, device='cuda'):
+    if tokenizer_path is None:
+        tokenizer_path = os.path.join(_PROJECT_ROOT, 'model')
+    if save_dir is None:
+        save_dir = os.path.join(_PROJECT_ROOT, 'checkpoints')
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
     if from_weight != "none":
@@ -54,7 +60,9 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='/root/autodl-t
     
     return model.to(device), tokenizer
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='/root/autodl-tmp/miniMind/checkpoints', **kwargs):
+def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir=None, tokenizer=None, **kwargs):
+    if save_dir is None:
+        save_dir = os.path.join(_PROJECT_ROOT, 'out')
     os.makedirs(save_dir, exist_ok=True)
     moe_suffix = "_moe" if lm_config.use_moe else ""
     ckp_path  = f"{save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth"
@@ -70,6 +78,23 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         ckp_tmp = ckp_path + ".tmp"
         torch.save(state_dict, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
+        if tokenizer is not None:
+            import shutil
+            hf_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}_hf"
+            os.makedirs(hf_path, exist_ok=True)
+            # 保存时用局部 auto_map，使 web_demo 无需依赖 model 包即可加载
+            orig_auto_map = lm_config.auto_map
+            lm_config.auto_map = {
+                "AutoConfig": "model_minimind.MiniMindConfig",
+                "AutoModelForCausalLM": "model_minimind.MiniMindForCausalLM",
+            }
+            raw_model.save_pretrained(hf_path, state_dict=state_dict, safe_serialization=False)
+            lm_config.auto_map = orig_auto_map
+            tokenizer.save_pretrained(hf_path)
+            shutil.copy2(
+                os.path.join(_PROJECT_ROOT, 'model', 'model_minimind.py'),
+                os.path.join(hf_path, 'model_minimind.py')
+            )
 
         wandb_id = None
         if wandb is not None:
@@ -144,7 +169,29 @@ class SkipBatchSampler(Sampler):
     def __len__(self):
         total_batches = (len(self.sampler) + self.batch_size - 1 )// self.batch_size
         return (total_batches - self.skip_batches)
-            
+
+class LMForRewardModel:
+    def __init__(self, model_path, device="cuda", dtype=torch.float16):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True, torch_dtype=dtype)
+        self.model = self.model.to(device).eval()
+        self.dtype = dtype
+    @torch.no_grad()
+    def get_score(self, messages, responses):
+        history_content = "\n".join([f"{m["role"]}:{m["content"]}" for m in messages[:-1]])
+        querry = messages[-1]["content"] if messages else ""
+        messages_content = f"{history_content}\n以上是对话历史。我的新问题是:\n{querry}" if history_content else querry
+        eval_messages = [
+            {"role":"user", "content": messages_content},
+            {"role":"assistant", "content": responses},
+        ]
+        score = self.model.get_score(self.tokenizer, eval_messages)
+        return max(min(score, 3.0), -3.0)
+
+
+
+
+              
 
 
 

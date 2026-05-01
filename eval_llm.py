@@ -45,6 +45,7 @@ if __name__ == "__main__":
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0-1，越大越随机）")
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
+    parser.add_argument('--open_thinking', default=0, type=int, help="是否开启自适应思考（0=否，1=是）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
@@ -68,8 +69,7 @@ if __name__ == "__main__":
         conversations = conversations[-args.historys:] if args.historys != 0 else []
         conversations.append({"role":"user", "content": prompt})
         if input_mode == 0: print(f'💬: {prompt}')
-        template = {"conversation": conversations, "tokenize": False, "add_generation_prompt":True}
-        if args.weight == "reason": template["enable_thinking"] = True
+        template = {"conversation": conversations, "tokenize": False, "add_generation_prompt":True, "open_thinking":bool(args.open_thinking)}
         prompt = tokenizer.apply_chat_template(**template) if args.weight != "pretrain" else tokenizer.bos_token + prompt
         inputs = tokenizer(prompt, return_tensors = 'pt', truncation=True).to(args.device)
         st = time.time()

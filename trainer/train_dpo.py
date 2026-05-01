@@ -110,7 +110,8 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
-                save_dir="/root/autodl-tmp/miniMind/checkpoints",
+                save_dir=args.save_dir,
+                tokenizer=tokenizer,
                 scaler=scaler
             )
             model.train() 
@@ -120,7 +121,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="MiniMind DPO (Direct Preference Optimization)")
-    parser.add_argument("--save_dir", type=str, default="/root/autodl-tmp/miniMind/out", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default=None, help="模型保存目录（默认 <项目根>/out）")
     parser.add_argument('--save_weight', default='dpo', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
@@ -144,6 +145,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str, default="MiniMind-DPO", help="wandb项目名")
     parser.add_argument("--use_compile", action="store_true", help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
+    if args.save_dir is None:
+        args.save_dir = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'out')
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
     if dist.is_initialized(): args.device = f"cuda:{local_rank}"
@@ -155,7 +158,7 @@ if __name__ == "__main__":
         use_moe=args.use_moe,
         num_hidden_layers=args.num_hidden_layers
     )
-    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='/root/autodl-tmp/miniMind/checkpoints') if args.from_resume == 1 else None
+    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir=args.save_dir) if args.from_resume == 1 else None
     # ========== 3. 设置混合精度 ==========
     dtype = torch.bfloat16 if args.dtype == 'bfloat16' else torch.float16
     device_type =  "cuda" if "cuda" in args.device else "cpu"

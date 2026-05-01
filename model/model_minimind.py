@@ -40,6 +40,10 @@ class MiniMindConfig(PretrainedConfig):
     ):
         
         super().__init__(**kwargs)
+        self.auto_map = {
+            "AutoConfig": "model.model_minimind.MiniMindConfig",
+            "AutoModelForCausalLM": "model.model_minimind.MiniMindForCausalLM"
+        }
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.bos_token_id = bos_token_id

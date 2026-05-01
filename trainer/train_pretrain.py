@@ -82,7 +82,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
-                save_dir="/root/autodl-tmp/miniMind/checkpoints",
+                save_dir=args.save_dir,
+                tokenizer=tokenizer,
                 scaler=scaler
             )
             model.train() 
@@ -93,7 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累计步数")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--save_dir", type=str, default="/root/autodl-tmp/miniMind/out", help="模型保存目录")
+    parser.add_argument("--save_dir", type=str, default=None, help="模型保存目录（默认 <项目根>/out）")
     parser.add_argument('--save_weight', default='pretrain', type=str, help="保存权重前缀")
     parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -115,6 +116,8 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度")
 
     args = parser.parse_args()
+    if args.save_dir is None:
+        args.save_dir = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'out')
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
