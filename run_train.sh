@@ -3,8 +3,45 @@
 # MiniMind-3 完整训练脚本（hidden_size=768, ~64M 参数）
 # 运行方式: bash run_train.sh
 # 建议后台挂起: nohup bash run_train.sh > train.log 2>&1 &
+#
+# 可选开关（在此处修改或通过环境变量覆盖）:
+#   USE_MOE=1      启用 Mixture-of-Experts
+#   USE_COMPILE=1  启用 torch.compile 加速
+#   USE_TMUX=1     在 tmux session（minimind-train）中运行
 # ==============================================================
 set -euo pipefail
+
+: "${USE_MOE:=0}"
+: "${USE_COMPILE:=0}"
+: "${USE_TMUX:=0}"
+
+# ----------------------------------------------------------
+# tmux: 若未在 tmux 内且 USE_TMUX=1，则自动重入 tmux session
+# ----------------------------------------------------------
+if [[ "$USE_TMUX" == "1" && -z "${TMUX:-}" ]]; then
+    SESSION="minimind-train"
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+        echo "Session '$SESSION' 已存在，请先 tmux kill-session -t $SESSION 或手动 attach"
+        exit 1
+    fi
+    echo "以 tmux session '$SESSION' 启动训练..."
+    exec tmux new-session -s "$SESSION" \
+        "USE_MOE=$USE_MOE USE_COMPILE=$USE_COMPILE bash \"${BASH_SOURCE[0]}\"; \
+         echo '训练结束，按任意键退出'; read -n1"
+fi
+
+# ----------------------------------------------------------
+# 根据开关构建附加参数
+# ----------------------------------------------------------
+EXTRA_ARGS=""
+[[ "$USE_MOE"      == "1" ]] && EXTRA_ARGS="$EXTRA_ARGS --use_moe"
+[[ "$USE_COMPILE"  == "1" ]] && EXTRA_ARGS="$EXTRA_ARGS --use_compile"
+
+echo "USE_MOE     : $USE_MOE"
+echo "USE_COMPILE : $USE_COMPILE"
+echo "USE_TMUX    : $USE_TMUX"
+echo "EXTRA_ARGS  : ${EXTRA_ARGS:-(none)}"
+echo ""
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REWARD_MODEL_DIR="$PROJECT_DIR/../internlm2-1_8b-reward"
