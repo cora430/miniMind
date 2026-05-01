@@ -74,10 +74,10 @@ snapshot_download(
     repo_type="dataset",
     local_dir=local_dir,
     allow_patterns=[
-        "pretrain_hq.jsonl",   # Pretrain 用
-        "sft_mini_512.jsonl",  # Full SFT 用
-        "dpo.jsonl",           # DPO 用
-        "rlaif.jsonl",         # GRPO 用
+        "pretrain_t2t_mini.jsonl",  # Pretrain 用 (1.24GB)
+        "sft_t2t_mini.jsonl",       # Full SFT 用 (1.74GB)
+        "dpo.jsonl",                # DPO 用
+        "rlaif.jsonl",              # GRPO 用
     ]
 )
 print("数据集下载完成")
@@ -92,19 +92,20 @@ cd "$PROJECT_DIR"
 
 # ==============================================================
 # Step 4: Pretrain（预训练）
-# 预计耗时: 8-12 小时
+# 数据: pretrain_t2t_mini ~0.25B tokens × 5 epochs
+# 预计耗时: ~3h
 # 输出: ./out/pretrain_768.pth
 # ==============================================================
 echo "========== [4/5] Pretrain =========="
 python -m trainer.train_pretrain \
     --hidden_size 768 \
     --num_hidden_layers 8 \
-    --epochs 1 \
+    --epochs 5 \
     --batch_size 64 \
     --learning_rate 5e-4 \
     --accumulation_steps 4 \
     --max_seq_len 512 \
-    --data_path ./dataset/pretrain_hq.jsonl \
+    --data_path ./dataset/pretrain_t2t_mini.jsonl \
     --save_dir ./out \
     --save_weight pretrain \
     --save_interval 2000 \
@@ -114,20 +115,21 @@ echo "Pretrain 完成"
 echo ""
 
 # ==============================================================
-# Step 5: Full SFT（全参微调）
-# 预计耗时: 3-5 小时
+# Step 5: Full SFT（全参监督微调）
+# 数据: sft_t2t_mini ~0.26B tokens × 5 epochs（含 Tool Call 数据）
+# 预计耗时: ~4h
 # 输出: ./out/full_sft_768.pth
 # ==============================================================
 echo "========== Full SFT =========="
 python -m trainer.train_full_sft \
     --hidden_size 768 \
     --num_hidden_layers 8 \
-    --epochs 3 \
+    --epochs 5 \
     --batch_size 32 \
     --learning_rate 1e-5 \
     --accumulation_steps 2 \
-    --max_seq_len 512 \
-    --data_path ./dataset/sft_mini_512.jsonl \
+    --max_seq_len 768 \
+    --data_path ./dataset/sft_t2t_mini.jsonl \
     --from_weight pretrain \
     --save_dir ./out \
     --save_weight full_sft \
@@ -139,7 +141,7 @@ echo ""
 
 # ==============================================================
 # Step 6: DPO（偏好对齐）
-# 预计耗时: 1-2 小时
+# 预计耗时: ~2h
 # 输出: ./out/dpo_768.pth
 # ==============================================================
 echo "========== DPO =========="
@@ -163,15 +165,15 @@ echo ""
 
 # ==============================================================
 # Step 7: GRPO（强化学习）
-# 预计耗时: 20-28 小时
+# 预计耗时: ~25h（剩余时间全给 RL，收益最大）
 # 输出: ./out/grpo_actor_768.pth
-# 注意: 从 full_sft 权重出发（而非 dpo），效果更稳定
+# 从 full_sft 出发（非 dpo），RL 对齐效果更稳定
 # ==============================================================
 echo "========== GRPO =========="
 python -m trainer.train_grpo \
     --hidden_size 768 \
     --num_hidden_layers 8 \
-    --epochs 2 \
+    --epochs 4 \
     --batch_size 4 \
     --num_generations 8 \
     --learning_rate 3e-7 \
