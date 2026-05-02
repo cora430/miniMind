@@ -46,7 +46,7 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path=None, save_dir=
     if tokenizer_path is None:
         tokenizer_path = os.path.join(_PROJECT_ROOT, 'model')
     if save_dir is None:
-        save_dir = os.path.join(_PROJECT_ROOT, 'checkpoints')
+        save_dir = os.path.join(_PROJECT_ROOT, 'out')
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
     if from_weight != "none":
