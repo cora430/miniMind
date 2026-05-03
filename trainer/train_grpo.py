@@ -97,7 +97,7 @@ def calculate_rewards(prompts, responses, reward_model, device):
             pattern = r"<\|im_start\|>(system|user|assistant)\s+(.*?)<\|im_end\|>"
             matches = re.findall(pattern, prompt, re.DOTALL)
             messages = [{"role": role, "content": content.strip()} for role, content in matches]
-            reward_model_scores.append(reward_model(messages, answer))
+            reward_model_scores.append(reward_model.get_score(messages, answer))
         reward_model_scores = torch.tensor(reward_model_scores, device=device)
         rewards = rewards + reward_model_scores
     return rewards
