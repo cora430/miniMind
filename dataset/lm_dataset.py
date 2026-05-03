@@ -166,7 +166,7 @@ class DPODataset(Dataset):
             target_ids = self.tokenizer(prompt[start_idx:end_idx]).input_ids
             start_token = len(prefix_ids)
             end_token = min(start_token + len(target_ids), len(input_ids))
-            mask[start_token:end_token] = 1
+            mask[start_token:end_token] = [1] * (end_token - start_token)
             start_pos = end_idx
         return mask
     def __getitem__(self, index):
