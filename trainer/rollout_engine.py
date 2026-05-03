@@ -62,7 +62,8 @@ class TorchRolloutEngine(RolloutEngine):
             # output_ids -> B*num_generations, P + R
             prompt_len = input_ids.shape[1]
             completions_ids = output_ids[:, prompt_len:] # completions_ids -> B*num_generations, R
-            per_token_logps = compute_per_token_logps(self.policy_model, input_ids=output_ids, logits_to_keep=completions_ids.shape[1], attention_mask=attention_mask)
+            full_attention_mask = (output_ids != self.tokenizer.pad_token_id).long()
+            per_token_logps = compute_per_token_logps(self.policy_model, input_ids=output_ids, logits_to_keep=completions_ids.shape[1], attention_mask=full_attention_mask)
         completions = self.tokenizer.batch_decode(completions_ids, skip_special_tokens=True)
         return RolloutResult(output_ids, completions_ids, per_token_logps, completions)
     def update_policy(self, model):
