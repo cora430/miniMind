@@ -184,16 +184,24 @@ def build_masks(gen_out: torch.Tensor, prompt_length: int, tokenizer, prompt_att
 # 3. rollout 阶段无梯度推理（GRPO 无 Critic）
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def collect_rollout(actor_model, ref_model, gen_out, full_mask, labels, resp_start, autocast_ctx):
+def collect_rollout(actor_model, ref_model, gen_out, full_mask, labels, resp_start, autocast_ctx, chunk_size=None):
     """
     只需要 Actor 快照 log π_old 和 Ref log π_ref，无 Critic。
+    chunk_size: 分块前向以节省显存（None = 不分块）
     """
-    with autocast_ctx:
-        old_logits = actor_model(input_ids=gen_out, attention_mask=full_mask).logits
-    old_logp = _gather_logp(old_logits[:, :-1], labels)[:, resp_start:]  # [B*G, R]
-    ref_logits = ref_model(input_ids=gen_out, attention_mask=full_mask).logits
-    ref_logp = _gather_logp(ref_logits[:, :-1], labels=labels)[:, resp_start:]  # [B*G, R]
-    return old_logp, ref_logp
+    B = gen_out.shape[0]
+    chunk = chunk_size or B
+    old_logp_list, ref_logp_list = [], []
+    for i in range(0, B, chunk):
+        sl = slice(i, i + chunk)
+        with autocast_ctx:
+            old_logits = actor_model(input_ids=gen_out[sl], attention_mask=full_mask[sl]).logits
+        old_logp_list.append(_gather_logp(old_logits[:, :-1], labels[sl])[:, resp_start:])
+        del old_logits
+        ref_logits = ref_model(input_ids=gen_out[sl], attention_mask=full_mask[sl]).logits
+        ref_logp_list.append(_gather_logp(ref_logits[:, :-1], labels[sl])[:, resp_start:])
+        del ref_logits
+    return torch.cat(old_logp_list, dim=0), torch.cat(ref_logp_list, dim=0)
 
 # ---------------------------------------------------------------------------
 # 4. GRPO 组内相对优势估计
@@ -294,29 +302,32 @@ def grpo_update(actor_model, batch: RolloutBatch, adv: AdvantageBatch,
                 actor_optimizer, actor_scheduler,
                 args, autocast_ctx, lm_config, grad_accum_step: int):
     total_size = batch.gen_out.shape[0]  # B*G
-    inds = torch.arange(total_size, device=args.device)
+    mini_bs = args.mini_batch_size  # chunk size for forward pass
     stats = {"policy_loss": 0.0, "aux_loss": 0.0, "approx_kl": 0.0, "kl_ref": 0.0, "clipfrac": 0.0, "count": 0}
 
     stop_grpo = False
     for _ in range(args.grpo_update_iters):
         if stop_grpo:
             break
-        out = forward_minibatch(actor_model, batch, adv, inds, args, autocast_ctx, lm_config)
-        kl_ref = _sync_kl(out["kl_ref"])
-        if kl_ref > args.early_stop_kl:
-            stop_grpo = True
-        loss = (out["policy_loss"] + out["aux_loss"]) * 0.0 if stop_grpo else \
-               (out["policy_loss"] + out["aux_loss"]).div(args.accumulation_steps)
-        loss.backward()
-        grad_accum_step += 1
-        if grad_accum_step % args.accumulation_steps == 0:
-            _optimizer_step(actor_optimizer, actor_scheduler, actor_model, args)
-        stats["policy_loss"] += out["policy_loss"].item()
-        stats["aux_loss"] += out["aux_loss"].item()
-        stats["approx_kl"] += out["approx_kl"].item()
-        stats["kl_ref"] += kl_ref
-        stats["clipfrac"] += out["clipfrac"].item()
-        stats["count"] += 1
+        perm = torch.randperm(total_size, device=args.device)
+        for mb_start in range(0, total_size, mini_bs):
+            mb_inds = perm[mb_start:mb_start + mini_bs]
+            out = forward_minibatch(actor_model, batch, adv, mb_inds, args, autocast_ctx, lm_config)
+            kl_ref = _sync_kl(out["kl_ref"])
+            if kl_ref > args.early_stop_kl:
+                stop_grpo = True
+            loss = (out["policy_loss"] + out["aux_loss"]) * 0.0 if stop_grpo else \
+                   (out["policy_loss"] + out["aux_loss"]).div(args.accumulation_steps)
+            loss.backward()
+            grad_accum_step += 1
+            if grad_accum_step % args.accumulation_steps == 0:
+                _optimizer_step(actor_optimizer, actor_scheduler, actor_model, args)
+            stats["policy_loss"] += out["policy_loss"].item()
+            stats["aux_loss"] += out["aux_loss"].item()
+            stats["approx_kl"] += out["approx_kl"].item()
+            stats["kl_ref"] += kl_ref
+            stats["clipfrac"] += out["clipfrac"].item()
+            stats["count"] += 1
     return stats, grad_accum_step
 
 # ---------------------------------------------------------------------------
@@ -416,7 +427,8 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model,
         m = build_masks(p["gen_out"], p["prompt_length"], tokenizer, p["prompt_attention_mask"])
         old_logp, ref_logp = collect_rollout(
             actor_model, ref_model,
-            p["gen_out"], m["full_mask"], m["labels"], m["resp_start"], autocast_ctx
+            p["gen_out"], m["full_mask"], m["labels"], m["resp_start"], autocast_ctx,
+            chunk_size=args.mini_batch_size
         )
         rollout_batch = RolloutBatch(
             gen_out=p["gen_out"],
@@ -473,6 +485,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
+    parser.add_argument("--mini_batch_size", type=int, default=0, help="前向传播 mini-batch 大小（0 = B*G 不分批）")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=1, help="日志打印间隔")
     parser.add_argument("--save_interval", type=int, default=10, help="模型保存间隔")
@@ -504,6 +517,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.save_dir is None:
         args.save_dir = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'out')
+    if args.mini_batch_size <= 0:
+        args.mini_batch_size = args.batch_size * args.num_generations
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
