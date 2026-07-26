@@ -26,7 +26,9 @@ def logits_to_log_probs(logits, labels):
     # log_probs shape: (batch_size, seq_len)
     log_probs = F.log_softmax(logits, dim=2)
     labels_for_gather = labels.clone()
+    # 这一步是为了防止超出索引的边界
     labels_for_gather[labels_for_gather == -100] = 0 # 随便给个索引，反正后面 mask 会乘 0
+    # 这里结果的形状和 index 是完全一样的
     log_probs_per_tokens = torch.gather(log_probs, dim=2, index=labels_for_gather.unsqueeze(2)).squeeze(-1)
     return log_probs_per_tokens
 def dpo_loss(ref_log_probs, policy_log_probs, mask, beta):

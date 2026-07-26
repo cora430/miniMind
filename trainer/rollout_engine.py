@@ -23,7 +23,7 @@ def compute_per_token_logps(model, input_ids: Tensor, logits_to_keep: int, atten
         # ids -> logits_to_keep
         ids = ids.detach().clone() if ids.is_inference() else ids
         logp.append(torch.gather(input=logit.log_softmax(-1), dim=1, index=ids.unsqueeze(1)).squeeze())
-    return torch.stack(logp, dim=0) # B, logits_to_keep
+    return torch.stack(logp, dim=0) # B, logits_to_keep 这里用stack是为了不丢失梯度
 @dataclass
 class RolloutResult:
     output_ids: Tensor

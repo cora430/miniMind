@@ -171,7 +171,7 @@ def build_masks(gen_out: torch.Tensor, prompt_length: int, tokenizer, prompt_att
 
     resp_policy_mask = (
         torch.arange(resp_labels.shape[1], device=gen_out.device).unsqueeze(0) < resp_lengths.unsqueeze(1)
-    ).float()
+    ).float() # B*G , R
     return {
         "labels": labels,
         "full_mask": full_mask,
@@ -201,7 +201,7 @@ def collect_rollout(actor_model, ref_model, gen_out, full_mask, labels, resp_sta
         ref_logits = ref_model(input_ids=gen_out[sl], attention_mask=full_mask[sl]).logits
         ref_logp_list.append(_gather_logp(ref_logits[:, :-1], labels[sl])[:, resp_start:])
         del ref_logits
-    return torch.cat(old_logp_list, dim=0), torch.cat(ref_logp_list, dim=0)
+    return torch.cat(old_logp_list, dim=0), torch.cat(ref_logp_list, dim=0) # B, R
 
 # ---------------------------------------------------------------------------
 # 4. GRPO 组内相对优势估计
@@ -465,7 +465,7 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model,
         if step % args.log_interval == 0 or step == iters:
             log_step(epoch, step, iters, stats, rollout_batch.rewards, rollout_batch.resp_length,
                      actor_optimizer, args, start_time, wandb)
-        if is_main_process() & step % args.save_interval == 0:
+        if is_main_process() and step % args.save_interval == 0:
             rollout_engine.update_policy(actor_model)
         if step % args.save_interval == 0 or step == iters:
             save_checkpoint(epoch, step, actor_model, actor_optimizer, actor_scheduler, args, lm_config, wandb)

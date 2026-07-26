@@ -49,18 +49,21 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
         if (step + 1) % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             eta_min = spend_time / steps_done_this_run * (iters - step - 1) // 60
-            # 1. 当前总损失 (已经包含 aux)
-            current_total_loss = res.loss.item() 
+            # 1. 当前总损失 (已经包含 aux 和 mtp)
+            current_total_loss = res.loss.item()
             # 2. 辅助损失
             current_aux_loss = res.aux_loss.item()
-            # 3. 纯 Logits 损失 (总减去辅助)
-            current_logits_loss = current_total_loss - current_aux_loss
+            # 3. MTP 损失 (按权重折算，与 total_loss 中实际占比一致)
+            current_mtp_loss = lm_config.mtp_loss_weight * res.mtp_loss.item()
+            # 4. 纯 Logits 损失 (总减去辅助、减去 mtp)
+            current_logits_loss = current_total_loss - current_aux_loss - current_mtp_loss
             
             Logger(
                 f"Epoch:[{epoch + 1}/{args.epochs}]({step + 1}/{iters}),"
                 f"Total Loss: {current_total_loss:.4f}," # 改名区分，更清晰
                 f"Logits Loss:{current_logits_loss:.4f},"
                 f"Aux Loss:{current_aux_loss:.4f},"
+                f"MTP Loss:{current_mtp_loss:.4f},"
                 f"lr:{lr:.8f},"
                 f"eta min:{eta_min:.1f}"
             )
@@ -69,6 +72,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
                     "loss":current_total_loss,
                     "logits_loss":current_logits_loss,
                     "aux_loss":current_aux_loss,
+                    "mtp_loss":current_mtp_loss,
                     "learning_rate":lr,
                     "epoch_time":eta_min
                 })

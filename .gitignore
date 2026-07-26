@@ -12,3 +12,4 @@ __pycache__/
 *.bin
 *.jsonl
 .DS_Store
+.venv/

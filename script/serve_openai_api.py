@@ -1,29 +1,41 @@
 import argparse
-from rich import prompt
-from sympy import true
+
 import torch
 import warnings
 warnings.filterwarnings('ignore')
 from model.model_lora import apply_lora, load_lora
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindForCausalLM, MiniMindConfig
-from trainer.trainer_utils import get_model_params, Logger
+from model.speculative_decode import mtp_speculative_generate_stream
+from trainer.trainer_utils import get_model_params, Logger, arch_suffix
 from pydantic import BaseModel
 from queue import Queue
-import re 
+import re
 import json
-import time 
+import time
 from threading import Thread
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
-import 
+
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from, )
     if "model" in args.load_from:
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model = MiniMindForCausalLM(MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=args.use_moe, inference_rope_scaling=args.inference_rope_scaling))
+        lm_config = MiniMindConfig(
+            hidden_size=args.hidden_size,
+            num_hidden_layers=args.num_hidden_layers,
+            use_moe=args.use_moe,
+            inference_rope_scaling=args.inference_rope_scaling,
+            use_gated_attention=args.use_gated_attention,
+            use_engram=args.use_engram,
+            engram_ngram_order=args.engram_ngram_order,
+            engram_num_buckets=args.engram_num_buckets,
+            engram_embed_dim=args.engram_embed_dim,
+            use_mtp=args.use_mtp,
+            mtp_depth=args.mtp_depth,
+        )
+        ckp = f'{args.save_dir}/{args.weight}_{args.hidden_size}{arch_suffix(lm_config)}.pth'
+        model = MiniMindForCausalLM(lm_config)
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model, )
@@ -31,6 +43,8 @@ def init_model(args):
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     Logger(f"MiniMind模型参数量:{sum(p.numel() for p in model.parameters())}M")
+    if args.use_mtp_speculative and not getattr(model.config, "use_mtp", False):
+        Logger("警告: --use_mtp_speculative 已开启，但加载的模型 config.use_mtp=False，将自动退回标准 generate()")
     return model.half().eval().to(args.device), tokenizer
 class ChatRequest(BaseModel):
     model: str
@@ -90,19 +104,40 @@ def generate_stream_response(messages, temperature, top_p, max_tokens, tools=Non
                         truncation=True
                         ).to(args.device)
         queue = Queue()
-        streamer = CustomStreamer(tokenizer, queue)
-        def _generate():
-            model.generate(
-                inputs.input_ids,
-                attention_mask = inputs.attention_mask,
-                do_sample = True,
-                max_new_tokens = args.max_tokens,
-                temperature = temperature,
-                top_p = top_p,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                streamer = streamer
-            )
+        use_speculative = args.use_mtp_speculative and getattr(model.config, "use_mtp", False)
+        if use_speculative:
+            # MTP 自投机解码目前只实现了贪心验证，不支持 temperature/top_p 采样，
+            # 开启该开关即视为接受"始终贪心解码"这个折中
+            def _generate():
+                try:
+                    generated_ids = []
+                    prev_text = ""
+                    for token_id in mtp_speculative_generate_stream(
+                        model, inputs.input_ids, max_new_tokens=args.max_tokens,
+                        eos_token_id=tokenizer.eos_token_id,
+                    ):
+                        generated_ids.append(token_id)
+                        text_so_far = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                        delta = text_so_far[len(prev_text):]
+                        if delta:
+                            queue.put(delta)
+                            prev_text = text_so_far
+                finally:
+                    queue.put(None)
+        else:
+            streamer = CustomStreamer(tokenizer, queue)
+            def _generate():
+                model.generate(
+                    inputs.input_ids,
+                    attention_mask = inputs.attention_mask,
+                    do_sample = True,
+                    max_new_tokens = args.max_tokens,
+                    temperature = temperature,
+                    top_p = top_p,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    streamer = streamer
+                )
         Thread(target=_generate).start()
         full_text = ""
         emitted = 0
@@ -145,7 +180,7 @@ def generate_stream_response(messages, temperature, top_p, max_tokens, tools=Non
         yield json.dumps({"error": str(e)})
 
 app = FastAPI()
-@app.post("v1/chat/completions")
+@app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
     try:
         if request.stream:
@@ -196,7 +231,7 @@ async def chat_completions(request: ChatRequest):
                         "index": 0,
                         "message": message,
                         "finish_reason": "tool_calls" if tool_calls else "stop"
-                    }请阅读整个文件夹
+                    }
                 ]
             }
     except Exception as e:
@@ -215,8 +250,16 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=8192, type=int, help="最大序列长度")
     parser.add_argument('--use_moe', action="store_true", help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
+    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（YaRN，将上下文外推到 max_position_embeddings）")
+    parser.add_argument('--use_gated_attention', action="store_true", help="加载的模型是否使用了门控注意力（需与训练时一致）")
+    parser.add_argument('--use_engram', action="store_true", help="加载的模型是否使用了Engram记忆增强（需与训练时一致）")
+    parser.add_argument('--engram_ngram_order', default=2, type=int, help="Engram的n-gram阶数（需与训练时一致）")
+    parser.add_argument('--engram_num_buckets', default=16384, type=int, help="Engram哈希桶数（需与训练时一致）")
+    parser.add_argument('--engram_embed_dim', default=64, type=int, help="Engram低秩embedding维度（需与训练时一致）")
+    parser.add_argument('--use_mtp', action="store_true", help="加载的模型是否使用了链式MTP（需与训练时一致）")
+    parser.add_argument('--mtp_depth', default=1, type=int, help="链式MTP深度（需与训练时一致）")
+    parser.add_argument('--use_mtp_speculative', action="store_true", help="用链式MTP做自投机解码来加速流式生成（仅贪心解码，需要 use_mtp 且模型确实训练过MTP）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
-    model, tokenizer = init_model()
+    model, tokenizer = init_model(args)
     uvicorn.run(app, host="0.0.0.0", port=8998)

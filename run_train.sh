@@ -1,19 +1,43 @@
 #!/bin/bash
 # ==============================================================
-# MiniMind-3 完整训练脚本（hidden_size=768, ~64M 参数）
+# MiniMind-3 Pretrain + Full SFT 训练脚本（hidden_size=768, ~64M 参数）
 # 运行方式: bash run_train.sh
 # 建议后台挂起: nohup bash run_train.sh > train.log 2>&1 &
 #
 # 可选开关（在此处修改或通过环境变量覆盖）:
-#   USE_MOE=1      启用 Mixture-of-Experts
-#   USE_COMPILE=1  启用 torch.compile 加速
-#   USE_TMUX=1     在 tmux session（minimind-train）中运行
+#   USE_MOE=1              启用 Mixture-of-Experts（显存开销大，6GB 卡不建议开）
+#   USE_GATED_ATTENTION=1  启用门控注意力（Qwen3-Next风格，+4.7M参数，默认开）
+#   USE_ENGRAM=1           启用Engram记忆增强（+1.7M参数，默认开）
+#   USE_MTP=1              启用链式MTP辅助训练（多一层的前反向开销，默认关）
+#   USE_COMPILE=1          启用 torch.compile 加速
+#   USE_TMUX=1             在 tmux session（minimind-train）中运行
+#   PRETRAIN_BATCH_SIZE    Pretrain 单步 batch size（默认 16，按 6GB 显存卡调低）
+#   PRETRAIN_ACCUM_STEPS   Pretrain 梯度累积步数（默认 16，等效 batch=256）
+#   FULLSFT_BATCH_SIZE     Full SFT 单步 batch size（默认 8）
+#   FULLSFT_ACCUM_STEPS    Full SFT 梯度累积步数（默认 8，等效 batch=64）
+# 若显存更大，可调大 *_BATCH_SIZE、调小 *_ACCUM_STEPS 以提速。
 # ==============================================================
 set -euo pipefail
 
 : "${USE_MOE:=0}"
+: "${USE_GATED_ATTENTION:=1}"
+: "${USE_ENGRAM:=1}"
+: "${USE_MTP:=0}"
 : "${USE_COMPILE:=0}"
 : "${USE_TMUX:=0}"
+: "${PRETRAIN_BATCH_SIZE:=16}"
+: "${PRETRAIN_ACCUM_STEPS:=16}"
+: "${FULLSFT_BATCH_SIZE:=8}"
+: "${FULLSFT_ACCUM_STEPS:=8}"
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 优先用项目自带的 uv venv（本机开发环境）；云端全新机器（如 AutoDL）通常没有
+# .venv，退回用系统/镜像自带的 python3（镜像一般已预装 PyTorch，直接能用）。
+if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+    PY="$PROJECT_DIR/.venv/bin/python"
+else
+    PY="$(command -v python3 || command -v python)"
+fi
 
 # ----------------------------------------------------------
 # tmux: 若未在 tmux 内且 USE_TMUX=1，则自动重入 tmux session
@@ -26,32 +50,43 @@ if [[ "$USE_TMUX" == "1" && -z "${TMUX:-}" ]]; then
     fi
     echo "以 tmux session '$SESSION' 启动训练..."
     exec tmux new-session -s "$SESSION" \
-        "USE_MOE=$USE_MOE USE_COMPILE=$USE_COMPILE bash \"${BASH_SOURCE[0]}\"; \
+        "USE_MOE=$USE_MOE USE_GATED_ATTENTION=$USE_GATED_ATTENTION USE_ENGRAM=$USE_ENGRAM USE_MTP=$USE_MTP USE_COMPILE=$USE_COMPILE bash \"${BASH_SOURCE[0]}\"; \
          echo '训练结束，按任意键退出'; read -n1"
 fi
 
 # ----------------------------------------------------------
 # 根据开关构建附加参数
+# 注意：train_pretrain.py 的 --use_moe/--use_gated_attention/--use_engram/
+# --use_mtp/--use_compile 是 type=int, choices=[0,1]（必须显式传值），而
+# train_full_sft.py 里同名参数是 action="store_true"（只看是否出现，不能
+# 传值）。两边 argparse 定义不一致，因此这里分别构造两份 EXTRA_ARGS，不能
+# 共用一份。
 # ----------------------------------------------------------
-EXTRA_ARGS=""
-[[ "$USE_MOE"      == "1" ]] && EXTRA_ARGS="$EXTRA_ARGS --use_moe"
-[[ "$USE_COMPILE"  == "1" ]] && EXTRA_ARGS="$EXTRA_ARGS --use_compile"
+PRETRAIN_EXTRA_ARGS="--use_moe $USE_MOE --use_gated_attention $USE_GATED_ATTENTION --use_engram $USE_ENGRAM --use_mtp $USE_MTP --use_compile $USE_COMPILE"
 
-echo "USE_MOE     : $USE_MOE"
-echo "USE_COMPILE : $USE_COMPILE"
-echo "USE_TMUX    : $USE_TMUX"
-echo "EXTRA_ARGS  : ${EXTRA_ARGS:-(none)}"
+FULLSFT_EXTRA_ARGS=""
+[[ "$USE_MOE"             == "1" ]] && FULLSFT_EXTRA_ARGS="$FULLSFT_EXTRA_ARGS --use_moe"
+[[ "$USE_GATED_ATTENTION" == "1" ]] && FULLSFT_EXTRA_ARGS="$FULLSFT_EXTRA_ARGS --use_gated_attention"
+[[ "$USE_ENGRAM"          == "1" ]] && FULLSFT_EXTRA_ARGS="$FULLSFT_EXTRA_ARGS --use_engram"
+[[ "$USE_MTP"             == "1" ]] && FULLSFT_EXTRA_ARGS="$FULLSFT_EXTRA_ARGS --use_mtp"
+[[ "$USE_COMPILE"         == "1" ]] && FULLSFT_EXTRA_ARGS="$FULLSFT_EXTRA_ARGS --use_compile"
+
+echo "USE_MOE             : $USE_MOE"
+echo "USE_GATED_ATTENTION : $USE_GATED_ATTENTION"
+echo "USE_ENGRAM          : $USE_ENGRAM"
+echo "USE_MTP             : $USE_MTP"
+echo "USE_COMPILE         : $USE_COMPILE"
+echo "USE_TMUX            : $USE_TMUX"
+echo "PRETRAIN_EXTRA_ARGS : $PRETRAIN_EXTRA_ARGS"
+echo "FULLSFT_EXTRA_ARGS  : ${FULLSFT_EXTRA_ARGS:-(none)}"
 echo ""
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REWARD_MODEL_DIR="$PROJECT_DIR/../internlm2-1_8b-reward"
 DATASET_DIR="$PROJECT_DIR/dataset"
 OUT_DIR="$PROJECT_DIR/out"
 
 mkdir -p "$OUT_DIR" "$DATASET_DIR"
 
 echo "PROJECT_DIR  : $PROJECT_DIR"
-echo "REWARD_MODEL : $REWARD_MODEL_DIR"
 echo "DATASET_DIR  : $DATASET_DIR"
 echo "OUT_DIR      : $OUT_DIR"
 echo ""
@@ -59,53 +94,34 @@ echo ""
 # ==============================================================
 # Step 1: 安装 Python 依赖
 # ==============================================================
-echo "========== [1/5] 安装 Python 依赖 =========="
-# 查当前 CUDA 版本，自动选 PyTorch wheel
-CUDA_VER=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release \([0-9]*\.[0-9]*\).*/\1/' || echo "12.1")
-echo "检测到 CUDA 版本: $CUDA_VER"
-
-CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
-CUDA_MINOR=$(echo "$CUDA_VER" | cut -d. -f2)
-if [[ "$CUDA_MAJOR" -ge 12 && "$CUDA_MINOR" -ge 8 ]]; then
-    TORCH_URL="https://download.pytorch.org/whl/cu128"
-elif [[ "$CUDA_MAJOR" -ge 12 && "$CUDA_MINOR" -ge 4 ]]; then
-    TORCH_URL="https://download.pytorch.org/whl/cu124"
-elif [[ "$CUDA_MAJOR" -ge 12 ]]; then
-    TORCH_URL="https://download.pytorch.org/whl/cu121"
+echo "========== [1/3] 检查/安装 Python 依赖 =========="
+echo "使用python: $PY"
+if command -v uv >/dev/null 2>&1; then
+    PIP_INSTALL=(uv pip install --python "$PY" -q)
 else
-    TORCH_URL="https://download.pytorch.org/whl/cu118"
+    PIP_INSTALL=("$PY" -m pip install -q)
 fi
-
-# 镜像已预装 PyTorch，跳过重复安装可节省时间；若需强制安装取消注释
-# pip install torch==2.7.0 torchvision torchaudio --index-url "$TORCH_URL" -q
-echo "PyTorch wheel URL（如需重装）: $TORCH_URL"
-pip install modelscope -q
-pip install -r "$PROJECT_DIR/requirements.txt" -q
-echo "依赖安装完成"
+if "$PY" -c "import torch, transformers, modelscope" >/dev/null 2>&1; then
+    echo "核心依赖（torch/transformers/modelscope）已就绪，跳过 requirements.txt 安装"
+else
+    # requirements.txt 锁的部分老版本包（如 ujson==5.1.0）在较新 Python（如 3.12）
+    # 上可能没有预编译 wheel，需要联网拉构建依赖源码编译，容易被网络问题卡住。
+    # 云端建议选 Python 3.10/3.11 的镜像来规避这个问题。
+    "${PIP_INSTALL[@]}" modelscope
+    "${PIP_INSTALL[@]}" -r "$PROJECT_DIR/requirements.txt"
+fi
+echo "依赖检查完成"
 echo ""
 
 # ==============================================================
-# Step 2: 下载奖励模型（与 miniMind 同级目录）
+# Step 2: 下载数据集（仅下载 Pretrain / Full SFT 需要的 2 个文件）
 # ==============================================================
-echo "========== [2/5] 下载奖励模型 =========="
-if [ ! -d "$REWARD_MODEL_DIR" ]; then
-    git clone https://www.modelscope.cn/Shanghai_AI_Laboratory/internlm2-1_8b-reward.git \
-        "$REWARD_MODEL_DIR"
-    echo "奖励模型下载完成: $REWARD_MODEL_DIR"
-else
-    echo "奖励模型已存在，跳过: $REWARD_MODEL_DIR"
-fi
-echo ""
-
-# ==============================================================
-# Step 3: 下载数据集（仅下载训练需要的 4 个文件）
-# ==============================================================
-echo "========== [3/5] 下载数据集 =========="
-python3 - <<PYEOF
+echo "========== [2/3] 下载数据集 =========="
+DATASET_DIR="$DATASET_DIR" "$PY" - <<PYEOF
 from modelscope.hub.snapshot_download import snapshot_download
 import os
 
-local_dir = os.environ.get("DATASET_DIR", "./dataset")
+local_dir = os.environ["DATASET_DIR"]
 snapshot_download(
     "gongjy/minimind_dataset",
     repo_type="dataset",
@@ -113,13 +129,10 @@ snapshot_download(
     allow_patterns=[
         "pretrain_t2t_mini.jsonl",  # Pretrain 用 (1.24GB)
         "sft_t2t_mini.jsonl",       # Full SFT 用 (1.74GB)
-        "dpo.jsonl",                # DPO 用
-        "rlaif.jsonl",              # GRPO 用
     ]
 )
 print("数据集下载完成")
 PYEOF
-export DATASET_DIR
 echo ""
 
 # ==============================================================
@@ -131,19 +144,18 @@ cd "$PROJECT_DIR"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ==============================================================
-# Step 4: Pretrain（预训练）
+# Step 3: Pretrain（预训练）
 # 数据: pretrain_t2t_mini ~0.25B tokens × 5 epochs
-# 预计耗时: ~3h
 # 输出: ./out/pretrain_768.pth
 # ==============================================================
-echo "========== [4/5] Pretrain =========="
-python -m trainer.train_pretrain \
+echo "========== [3/3] Pretrain =========="
+"$PY" -m trainer.train_pretrain \
     --hidden_size 768 \
     --num_hidden_layers 8 \
     --epochs 5 \
-    --batch_size 32 \
+    --batch_size "$PRETRAIN_BATCH_SIZE" \
     --learning_rate 5e-4 \
-    --accumulation_steps 8 \
+    --accumulation_steps "$PRETRAIN_ACCUM_STEPS" \
     --max_seq_len 512 \
     --data_path ./dataset/pretrain_t2t_mini.jsonl \
     --save_dir ./out \
@@ -151,24 +163,23 @@ python -m trainer.train_pretrain \
     --save_interval 2000 \
     --log_interval 200 \
     --dtype bfloat16 \
-    $EXTRA_ARGS
+    $PRETRAIN_EXTRA_ARGS
 echo "Pretrain 完成"
 echo ""
 
 # ==============================================================
-# Step 5: Full SFT（全参监督微调）
+# Step 4: Full SFT（全参监督微调）
 # 数据: sft_t2t_mini ~0.26B tokens × 5 epochs（含 Tool Call 数据）
-# 预计耗时: ~4h
 # 输出: ./out/full_sft_768.pth
 # ==============================================================
 echo "========== Full SFT =========="
-python -m trainer.train_full_sft \
+"$PY" -m trainer.train_full_sft \
     --hidden_size 768 \
     --num_hidden_layers 8 \
     --epochs 5 \
-    --batch_size 32 \
+    --batch_size "$FULLSFT_BATCH_SIZE" \
     --learning_rate 1e-5 \
-    --accumulation_steps 2 \
+    --accumulation_steps "$FULLSFT_ACCUM_STEPS" \
     --max_seq_len 768 \
     --data_path ./dataset/sft_t2t_mini.jsonl \
     --from_weight pretrain \
@@ -177,64 +188,8 @@ python -m trainer.train_full_sft \
     --save_interval 1000 \
     --log_interval 100 \
     --dtype bfloat16 \
-    $EXTRA_ARGS
+    $FULLSFT_EXTRA_ARGS
 echo "Full SFT 完成"
-echo ""
-
-# ==============================================================
-# Step 6: DPO（偏好对齐）
-# 预计耗时: ~2h
-# 输出: ./out/dpo_768.pth
-# ==============================================================
-echo "========== DPO =========="
-python -m trainer.train_dpo \
-    --hidden_size 768 \
-    --num_hidden_layers 8 \
-    --epochs 2 \
-    --batch_size 8 \
-    --learning_rate 5e-8 \
-    --max_seq_len 1024 \
-    --data_path ./dataset/dpo.jsonl \
-    --from_weight full_sft \
-    --save_dir ./out \
-    --save_weight dpo \
-    --save_interval 200 \
-    --log_interval 50 \
-    --beta 0.15 \
-    --dtype bfloat16 \
-    $EXTRA_ARGS
-echo "DPO 完成"
-echo ""
-
-# ==============================================================
-# Step 7: GRPO（强化学习）
-# 预计耗时: ~25h（剩余时间全给 RL，收益最大）
-# 输出: ./out/grpo_actor_768.pth
-# 从 full_sft 出发（非 dpo），RL 对齐效果更稳定
-# ==============================================================
-echo "========== GRPO =========="
-python -m trainer.train_grpo \
-    --hidden_size 768 \
-    --num_hidden_layers 8 \
-    --epochs 4 \
-    --batch_size 4 \
-    --num_generations 8 \
-    --learning_rate 3e-7 \
-    --max_seq_len 512 \
-    --max_gen_len 512 \
-    --grpo_update_iters 2 \
-    --kl_coef 0.1 \
-    --clip_epsilon 0.2 \
-    --data_path ./dataset/rlaif.jsonl \
-    --from_weight full_sft \
-    --save_dir ./out \
-    --save_weight grpo_actor \
-    --reward_model_path "$REWARD_MODEL_DIR" \
-    --rollout_engine torch \
-    --save_interval 20 \
-    --log_interval 5 \
-    --dtype bfloat16
-echo "GRPO 完成"
 echo ""
 
 echo "========== 全部训练完成 =========="

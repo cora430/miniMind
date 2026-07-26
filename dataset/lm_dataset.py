@@ -9,7 +9,8 @@ import json
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def pre_processing_chat(conversations, add_system_ratio=0.2):
-    if any( conv.get("tool") for conv in conversations): return conversations
+    has_tools = conversations and conversations[0].get("role") == "system" and (conversations[0].get("functions") or conversations[0].get("tools"))
+    if has_tools or any(conv.get("role") == "tool" for conv in conversations): return conversations
     SYSTEM_PROMPTS = [
         "你是一个知识丰富的AI，尽力为用户提供准确的信息。",
         "你是minimind，一个小巧但有用的语言模型。",

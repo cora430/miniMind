@@ -40,18 +40,20 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         if (step + 1) % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             eta_min = spend_time / steps_done_this_run * (iters - step - 1) // 60
-            # 1. 当前总损失 (已经包含 aux)
-            current_total_loss = res.loss.item() 
+            # 1. 当前总损失 (已经包含 aux 与 mtp)
+            current_total_loss = res.loss.item()
             # 2. 辅助损失
             current_aux_loss = res.aux_loss.item()
+            current_mtp_loss = res.mtp_loss.item()
             # 3. 纯 Logits 损失 (总减去辅助)
-            current_logits_loss = current_total_loss - current_aux_loss
-            
+            current_logits_loss = current_total_loss - current_aux_loss - lm_config.mtp_loss_weight * current_mtp_loss
+
             Logger(
                 f"Epoch:[{epoch + 1}/{args.epochs}]({step + 1}/{iters}),"
                 f"Total Loss: {current_total_loss:.4f}," # 改名区分，更清晰
                 f"Logits Loss:{current_logits_loss:.4f},"
                 f"Aux Loss:{current_aux_loss:.4f},"
+                f"MTP Loss:{current_mtp_loss:.4f},"
                 f"lr:{lr:.8f},"
                 f"eta min:{eta_min:.1f}"
             )
@@ -60,6 +62,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                     "loss":current_total_loss,
                     "logits_loss":current_logits_loss,
                     "aux_loss":current_aux_loss,
+                    "mtp_loss":current_mtp_loss,
                     "learning_rate":lr,
                     "epoch_time":eta_min
                 })
@@ -93,6 +96,14 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
     parser.add_argument('--use_moe', action="store_true", help="是否使用MoE架构（0=否，1=是）")
+    parser.add_argument('--use_gated_attention', action="store_true", help="是否使用门控注意力（Qwen3-Next风格）")
+    parser.add_argument('--use_engram', action="store_true", help="是否使用Engram记忆增强")
+    parser.add_argument('--engram_ngram_order', default=2, type=int, help="Engram使用的n-gram阶数")
+    parser.add_argument('--engram_num_buckets', default=16384, type=int, help="Engram哈希桶数（决定记忆表参数量）")
+    parser.add_argument('--engram_embed_dim', default=64, type=int, help="Engram低秩embedding维度")
+    parser.add_argument('--use_mtp', action="store_true", help="是否使用链式MTP（多token预测）辅助训练")
+    parser.add_argument('--mtp_depth', default=1, type=int, help="链式MTP的深度（预测未来几个token）")
+    parser.add_argument('--mtp_loss_weight', default=0.3, type=float, help="MTP辅助loss的合并权重")
     parser.add_argument("--data_path", type=str, default="/root/autodl-tmp/miniMind/dataset/sft_t2t_mini.jsonl", help="训练数据路径")
     parser.add_argument('--from_weight', default='pretrain_t2t_mini', type=str, help="基于哪个权重训练，为none则不基于任何权重训练")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
@@ -112,7 +123,15 @@ if __name__ == "__main__":
     lm_config = MiniMindConfig(
         hidden_size=args.hidden_size,
         use_moe=args.use_moe,
-        num_hidden_layers=args.num_hidden_layers
+        num_hidden_layers=args.num_hidden_layers,
+        use_gated_attention=args.use_gated_attention,
+        use_engram=args.use_engram,
+        engram_ngram_order=args.engram_ngram_order,
+        engram_num_buckets=args.engram_num_buckets,
+        engram_embed_dim=args.engram_embed_dim,
+        use_mtp=args.use_mtp,
+        mtp_depth=args.mtp_depth,
+        mtp_loss_weight=args.mtp_loss_weight,
     )
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir=args.save_dir) if args.from_resume==1 else None
     # ========== 3. 设置混合精度 ==========

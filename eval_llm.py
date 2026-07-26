@@ -7,7 +7,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import *
-from trainer.trainer_utils import setup_seed, get_model_params
+from model.speculative_decode import mtp_speculative_generate
+from trainer.trainer_utils import setup_seed, get_model_params, arch_suffix
 warnings.filterwarnings('ignore')
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
@@ -17,15 +18,21 @@ def init_model(args):
             num_hidden_layers=args.num_hidden_layers,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling,
-
+            use_gated_attention=bool(args.use_gated_attention),
+            use_engram=bool(args.use_engram),
+            engram_ngram_order=args.engram_ngram_order,
+            engram_num_buckets=args.engram_num_buckets,
+            engram_embed_dim=args.engram_embed_dim,
+            use_mtp=bool(args.use_mtp),
+            mtp_depth=args.mtp_depth,
         )
         model = MiniMindForCausalLM(lm_config)
-        moe_suffix = "_moe" if args.use_moe else ""
-        ckp_path = f"{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth"
+        suffix = arch_suffix(lm_config)
+        ckp_path = f"{args.save_dir}/{args.weight}_{args.hidden_size}{suffix}.pth"
         model.load_state_dict(torch.load(ckp_path, map_location=args.device),strict=True)
         if args.lora_weight != "None":
             apply_lora(model)
-            load_lora(model, f"/root/autodl-tmp/miniMind/out/lora/{args.lora_weight}_{args.hidden_size}{moe_suffix}.pth")
+            load_lora(model, f"/root/autodl-tmp/miniMind/out/lora/{args.lora_weight}_{args.hidden_size}{suffix}.pth")
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code = True)
     return model.eval().to(args.device), tokenizer
@@ -40,7 +47,15 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度（512=Small-26M, 640=MoE-145M, 768=Base-104M）")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量（Small/MoE=8, Base=16）")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
+    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（YaRN，将上下文外推到 max_position_embeddings）")
+    parser.add_argument('--use_gated_attention', default=0, type=int, choices=[0, 1], help="加载的模型是否使用了门控注意力（需与训练时一致）")
+    parser.add_argument('--use_engram', default=0, type=int, choices=[0, 1], help="加载的模型是否使用了Engram记忆增强（需与训练时一致）")
+    parser.add_argument('--engram_ngram_order', default=2, type=int, help="Engram的n-gram阶数（需与训练时一致）")
+    parser.add_argument('--engram_num_buckets', default=16384, type=int, help="Engram哈希桶数（需与训练时一致）")
+    parser.add_argument('--engram_embed_dim', default=64, type=int, help="Engram低秩embedding维度（需与训练时一致）")
+    parser.add_argument('--use_mtp', default=0, type=int, choices=[0, 1], help="加载的模型是否使用了链式MTP（需与训练时一致）")
+    parser.add_argument('--mtp_depth', default=1, type=int, help="链式MTP深度（需与训练时一致）")
+    parser.add_argument('--use_mtp_speculative', default=0, type=int, choices=[0, 1], help="用链式MTP自投机解码代替标准generate（仅贪心解码，会打印两者耗时对比）")
     parser.add_argument('--max_new_tokens', default=8192, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0-1，越大越随机）")
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
@@ -74,19 +89,28 @@ if __name__ == "__main__":
         inputs = tokenizer(prompt, return_tensors = 'pt', truncation=True).to(args.device)
         st = time.time()
         print('🤖: ', end='')
-        generate_ids = model.generate(inputs=inputs["input_ids"], 
-                       attention_mask=inputs["attention_mask"], 
-                       streamer=streamer, 
-                       max_new_tokens=args.max_new_tokens, 
-                       temperature=args.temperature,
-                       top_p=args.top_p,
-                       pad_token_id=tokenizer.pad_token_id,
-                       eos_token_id=tokenizer.eos_token_id,
-                       do_sample=True,
-                       repetition_penalty=1.0,
+        use_speculative = bool(args.use_mtp_speculative) and getattr(model.config, "use_mtp", False)
+        if use_speculative:
+            # 自投机解码目前只实现贪心验证，没有走 streamer，生成完再一次性打印+统计
+            generate_ids, spec_stats = mtp_speculative_generate(
+                model, inputs["input_ids"], max_new_tokens=args.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
+            )
+            response = tokenizer.decode(generate_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+            print(response)
+        else:
+            generate_ids = model.generate(inputs=inputs["input_ids"],
+                           attention_mask=inputs["attention_mask"],
+                           streamer=streamer,
+                           max_new_tokens=args.max_new_tokens,
+                           temperature=args.temperature,
+                           top_p=args.top_p,
+                           pad_token_id=tokenizer.pad_token_id,
+                           eos_token_id=tokenizer.eos_token_id,
+                           do_sample=True,
+                           repetition_penalty=1.0,
 
-                       )
-        response = tokenizer.decode(generate_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                           )
+            response = tokenizer.decode(generate_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
         conversations.append({"role": "assistant", "content": response})
         gen_token_num = len(generate_ids[0][len(inputs["input_ids"][0]):])
         if args.show_speed == 1: 

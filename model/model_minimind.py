@@ -36,6 +36,17 @@ class MiniMindConfig(PretrainedConfig):
             aux_loss_alpha: float = 0.01,
             seq_aux: bool = True,
             norm_topk_prob: bool = True,
+            # gated attention (Qwen3-Next 风格注意力输出门控)
+            use_gated_attention: bool = False,
+            # engram（n-gram 哈希记忆增强）
+            use_engram: bool = False,
+            engram_ngram_order: int = 2,
+            engram_num_buckets: int = 16384,
+            engram_embed_dim: int = 64,
+            # 链式 MTP（DeepSeek-V3 风格多 token 预测）
+            use_mtp: bool = False,
+            mtp_depth: int = 1,
+            mtp_loss_weight: float = 0.3,
             **kwargs
     ):
         
@@ -75,6 +86,14 @@ class MiniMindConfig(PretrainedConfig):
         self.aux_loss_alpha = aux_loss_alpha
         self.seq_aux = seq_aux
         self.norm_topk_prob = norm_topk_prob
+        self.use_gated_attention = use_gated_attention
+        self.use_engram = use_engram
+        self.engram_ngram_order = engram_ngram_order
+        self.engram_num_buckets = engram_num_buckets
+        self.engram_embed_dim = engram_embed_dim
+        self.use_mtp = use_mtp
+        self.mtp_depth = mtp_depth
+        self.mtp_loss_weight = mtp_loss_weight
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -87,7 +106,8 @@ class RMSNorm(nn.Module):
 
 def precompute_freqs_cis(dim: int, end: int = 16*2048, rope_base: float = 1e6, rope_scaling: Optional[dict] = None):
     freqs, attention_factor = 1 / (rope_base ** (torch.arange(0, dim, 2).float() / dim)), 1.0
-    #  base_theta -> dim // 2,
+    # base_theta -> dim // 2,
+    # freqs 是每个token转多少弧度
     if rope_scaling is not None:
         beta_fast, beta_slow, factor, original_max_position_embeddings, attention_factor = (
             rope_scaling.get("beta_fast"),
@@ -98,8 +118,11 @@ def precompute_freqs_cis(dim: int, end: int = 16*2048, rope_base: float = 1e6, r
         )
         if end > original_max_position_embeddings:
             inv_dim = lambda b: (dim*math.log(original_max_position_embeddings / (b*2*math.pi))) / (2*math.log(rope_base))
-            low, high  = math.max(math.floor(inv_dim(beta_slow)), 0), math.min(math.ceil(inv_dim(beta_fast)), dim//2-1)
+            low, high  = max(math.floor(inv_dim(beta_slow)), 0), min(math.ceil(inv_dim(beta_fast)), dim//2-1)
             ramp = torch.clamp((torch.arange(dim//2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
+            # ramp 决定 多少是慢速（freqs/factor）,多少是原速
+            # 因为i小的就是低维的他的freqs大，大意味着整个圆都转过了，没有盲区
+            # i大的就是高维的他的freqs小，而小就意味着训练时候可能只转了很小一部分，还有很大的盲区没有转过，当推理的时候上下文一长，角度一大他就容易到盲区
             freqs = freqs * (1 - ramp + ramp / factor)
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float() # end, dim//2
@@ -139,7 +162,14 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.head_dim * self.n_local_heads, args.hidden_size, bias = False)
         self.attn_dropout = nn.Dropout(self.dropout)
         self.resid_dropout = nn.Dropout(self.dropout)
-        
+
+        self.use_gated_attention = args.use_gated_attention
+        if self.use_gated_attention:
+            self.gate_proj = nn.Linear(args.hidden_size, self.head_dim * self.n_local_heads, bias=True)
+            # 门控初始化为近似恒等（sigmoid(3)≈0.95），避免续训旧 checkpoint 时行为被剧烈打乱
+            nn.init.zeros_(self.gate_proj.weight)
+            nn.init.constant_(self.gate_proj.bias, 3.0)
+
         self.flash = args.flash_attn and hasattr(torch.nn.functional, "scaled_dot_product_attention")
     def forward(self, 
                 x: torch.Tensor, 
@@ -163,8 +193,10 @@ class Attention(nn.Module):
         qx = qx.transpose(1, 2).contiguous()# bsz, num_heads, seq_len , head_dim
         kx = repeat_kv(kx, self.n_rep).transpose(1, 2).contiguous() # bsz, num_heads, seq_len + ?, head_dim
         vx = repeat_kv(vx, self.n_rep).transpose(1, 2).contiguous() # bsz, num_heads, seq_len + ?, head_dim
-        if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
-            # training
+        if self.flash and seq_len > 1 and past_key_value is None and (attention_mask is None or torch.all(attention_mask == 1)):
+            # training / 无 cache 的整段 prefill：is_causal=True 在 query/key 等长时才是对的因果对齐，
+            # 一旦带着 KV cache 再喂入多个新 token（如投机解码的批量验证），
+            # SDPA 的 is_causal 不会自动做 bottom-right 对齐，必须退回下面手写的因果 mask 分支
             output = F.scaled_dot_product_attention(qx, kx, vx, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             scores = qx @ kx.transpose(-1, -2) / math.sqrt(self.head_dim) # bsz, num_heads, seq_len, seq_len + ?
@@ -172,6 +204,7 @@ class Attention(nn.Module):
             if attention_mask is not None:
                 # attn_mask -> bsz, seq_len + ?
                 extended_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                # 有了attention_mask算分数的时候就会几乎为0
                 scores = scores + (1.0 - extended_mask) * (-1e9)
             scores = F.softmax(scores.float(), dim=-1).type_as(x)
             scores = self.attn_dropout(scores)
@@ -180,6 +213,9 @@ class Attention(nn.Module):
         # output -> bsz, seq_len, hidden_dim
         # past_kv -> k: bsz, seq_len + ?, self.n_local_kv_heads, self.head_dim
         #            v: bsz, seq_len + ?, self.n_local_kv_heads, self.head_dim
+        if self.use_gated_attention:
+            # 门控信号来自本层输入 x（而非 attention 输出本身），避免自环
+            output = output * torch.sigmoid(self.gate_proj(x))
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
         
@@ -366,7 +402,78 @@ class MiniMindBlock(nn.Module):
         # 记录当前层的 aux_loss
         #current_aux_loss = self.mlp.aux_loss if hasattr(self.mlp, 'aux_loss') else 0
         return hidden_states, past_kv
-    
+
+
+class EngramMemory(nn.Module):
+    """n-gram 哈希记忆增强：用最近 ngram_order 个 token id 的固定滚动哈希查一张
+    低秩 embedding 表，门控融合进 hidden state，给模型一条不经过 attention/FFN
+    的"记忆"通路。哈希函数不可训练（Horner 法滚动哈希 mod 桶数），只有查表结果
+    和融合门控是可训练参数。
+    """
+    def __init__(self, config: MiniMindConfig):
+        super().__init__()
+        self.ngram_order = max(2, config.engram_ngram_order)
+        self.num_buckets = config.engram_num_buckets
+        self.hash_base = 1000003
+        self.bucket_embed = nn.Embedding(self.num_buckets, config.engram_embed_dim)
+        self.up_proj = nn.Linear(config.engram_embed_dim, config.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        # 门控初始化为接近关闭（sigmoid(-3)≈0.047），让模型从"几乎不用记忆"起步，
+        # 训练中按需学着打开，避免一开始就把随机初始化的记忆表噪声注入主干
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.constant_(self.gate_proj.bias, -3.0)
+        # 增量 decode（每步只喂 1 个新 token）时用来记住最近 ngram_order-1 个 token 的滑窗。
+        # 注意：这是模块级可变状态，只对"单序列顺序生成"正确；每次全新 prefill
+        # （cache 为空）会被 MiniMindModel.forward 调用 reset_state() 清空，
+        # 但同一模型实例被用于并发/交织的多会话生成时会互相污染，需要调用方自行隔离实例。
+        self._decode_history: Optional[torch.Tensor] = None
+
+    def reset_state(self):
+        self._decode_history = None
+
+    def _hash_to_bucket(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        # ngram_ids -> ..., ngram_order（最旧的 token 在前），逐步取模避免溢出
+        hashed = torch.zeros(ngram_ids.shape[:-1], dtype=torch.long, device=ngram_ids.device)
+        for i in range(ngram_ids.shape[-1]):
+            hashed = (hashed * self.hash_base + ngram_ids[..., i].long()) % self.num_buckets
+        return hashed
+
+    def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor, use_cache: bool = False):
+        bsz, seq_len = input_ids.shape
+        pad_len = self.ngram_order - 1
+        if use_cache and self._decode_history is not None:
+            history = self._decode_history
+        elif pad_len > 0:
+            # 序列最开头没有真实历史，用当前块的第一个 token 自我填充（causal-safe 的近似）
+            history = input_ids[:, :1].expand(bsz, pad_len)
+        else:
+            history = input_ids[:, :0]
+        full_ids = torch.cat([history, input_ids], dim=1)  # bsz, pad_len+seq_len
+        windows = full_ids.unfold(dimension=1, size=self.ngram_order, step=1)  # bsz, seq_len, ngram_order
+        bucket_ids = self._hash_to_bucket(windows)
+        embed = self.up_proj(self.bucket_embed(bucket_ids))
+        gate = torch.sigmoid(self.gate_proj(hidden_states))
+        if use_cache:
+            self._decode_history = full_ids[:, -pad_len:].detach() if pad_len > 0 else full_ids[:, :0]
+        return hidden_states + gate * embed
+
+
+class MTPModule(nn.Module):
+    """链式 MTP 的单个预测深度（DeepSeek-V3 风格）：把上一深度的 hidden state 和
+    未来第 k 个 token 的真实 embedding 拼接、降维，过一个浅层 transformer block，
+    输出喂给下一深度，实现"链式"多 token 预测。
+    """
+    def __init__(self, config: MiniMindConfig):
+        super().__init__()
+        self.hidden_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.embed_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.proj = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+        self.block = MiniMindBlock(layer_id=-1, config=config)
+
+    def forward(self, prev_hidden, next_token_embeds, cis, attention_mask=None):
+        fused = self.proj(torch.cat([self.hidden_norm(prev_hidden), self.embed_norm(next_token_embeds)], dim=-1))
+        hidden_states, _ = self.block(fused, use_cache=False, past_key_value=None, cis=cis, attention_mask=attention_mask)
+        return hidden_states
 
 
 class MiniMindModel(nn.Module):
@@ -377,7 +484,8 @@ class MiniMindModel(nn.Module):
         self.embd_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.layers = nn.ModuleList([MiniMindBlock(i, config) for i in range(config.num_hidden_layers)])
-        
+        self.engram = EngramMemory(config) if config.use_engram else None
+
         self.head_dim = config.hidden_size // config.num_attention_heads
         freqs_cos, freqs_sin = precompute_freqs_cis(
             self.head_dim, config.max_position_embeddings, config.rope_theta, config.rope_scaling
@@ -401,9 +509,15 @@ class MiniMindModel(nn.Module):
             self.freqs_cos[start : start + seq_len],
             self.freqs_sin[start : start + seq_len]
         )
-        
+
         hidden_states = self.dropout(self.embd_tokens(input_ids))
-        
+
+        if self.engram is not None:
+            if start == 0:
+                # 新的 prefill（cache 为空）意味着一段新的生成/前向序列开始，清空滑窗历史
+                self.engram.reset_state()
+            hidden_states = self.engram(hidden_states, input_ids, use_cache=use_cache)
+
         presents = []
         # 初始化 aux_loss，确保其具有梯度追踪能力
         total_aux_loss = hidden_states.new_zeros(1).squeeze()
@@ -427,6 +541,13 @@ class MiniMindModel(nn.Module):
 class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = MiniMindConfig
 
+    @classmethod
+    def _supports_default_dynamic_cache(cls) -> bool:
+        # past_key_values 用的是自定义的 list[tuple(k, v)] 格式，不是 transformers.Cache，
+        # 禁止 generate() 自动注入 DynamicCache，否则首步会被 model_minimind.py 里的
+        # `hasattr(past_key_values, "layers")` 兜底逻辑强制清空 cache。
+        return False
+
     def __init__(self, config: MiniMindConfig = None):
         self.config = config or MiniMindConfig()
         super().__init__(self.config)
@@ -434,6 +555,38 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         # 权重共享
         self.model.embd_tokens.weight = self.lm_head.weight
+        self.mtp_modules = (
+            nn.ModuleList([MTPModule(self.config) for _ in range(self.config.mtp_depth)])
+            if self.config.use_mtp else None
+        )
+
+    def compute_mtp_loss(self, hidden_states: torch.Tensor, input_ids: torch.Tensor, labels: torch.Tensor):
+        # 链式多 token 预测的训练侧辅助 loss：深度 d 的模块用位置 i 的 h^{d-1} 和
+        # token_{i+d} 的真实 embedding 预测 token_{i+d+1}，链式指下一深度接着用上一深度的输出
+        seq_len = input_ids.shape[1]
+        cis = (self.model.freqs_cos[:seq_len], self.model.freqs_sin[:seq_len])
+        prev_hidden = hidden_states
+        total_loss = hidden_states.new_zeros(1).squeeze()
+        computed = 0
+        for depth, module in enumerate(self.mtp_modules, start=1):
+            length = seq_len - depth - 1
+            if length <= 0:
+                break
+            cur_prev_hidden = prev_hidden[:, :length, :]
+            next_token_embeds = self.model.embd_tokens(input_ids[:, depth:depth + length])
+            step_cis = (cis[0][:length], cis[1][:length])
+            h_d = module(cur_prev_hidden, next_token_embeds, step_cis)
+            logits_d = self.lm_head(h_d)
+            target = labels[:, depth + 1:depth + 1 + length]
+            loss_d = F.cross_entropy(
+                logits_d.reshape(-1, self.config.vocab_size),
+                target.reshape(-1),
+                ignore_index=-100
+            )
+            total_loss = total_loss + loss_d
+            prev_hidden = h_d
+            computed += 1
+        return total_loss / computed if computed > 0 else total_loss
 
     def forward(self,
                 input_ids: Optional[torch.Tensor] = None,
@@ -454,20 +607,26 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         
         loss = None
+        mtp_loss = hidden_states.new_zeros(1).squeeze()
         if labels is not None:
             # 3. 计算交叉熵损失 (Token Prediction Loss)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
-            
+
             logits_loss = F.cross_entropy(
                 shift_logits.view(-1, self.config.vocab_size),
                 shift_labels.view(-1),
                 ignore_index=-100
             )
-            
+
             # 4. 【核心修复】将 aux_loss 合并到主 loss 中，否则 aux_loss 不会产生梯度
             # 这样 Gate 权重才会根据负载均衡情况进行更新
             loss = logits_loss + aux_loss
+
+            # 5. 链式 MTP 的辅助 loss（仅训练时计算），按权重合并进主 loss
+            if self.config.use_mtp and self.mtp_modules is not None:
+                mtp_loss = self.compute_mtp_loss(hidden_states, input_ids, labels)
+                loss = loss + self.config.mtp_loss_weight * mtp_loss
         else:
             # 推理阶段不需要 loss
             loss = None
@@ -480,9 +639,10 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
             hidden_states=hidden_states
         )
         
-        # 记录原始的 aux_loss 方便日志打点
+        # 记录原始的 aux_loss / mtp_loss 方便日志打点
         output.aux_loss = aux_loss
-        
+        output.mtp_loss = mtp_loss
+
         return output
 
         

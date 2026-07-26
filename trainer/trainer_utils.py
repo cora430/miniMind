@@ -35,6 +35,15 @@ def get_model_params(model, config):
     if active < base : Logger(f"moe model params: {total:.2f}M - active params: {active:.2f}M")
     else: Logger(f"model params:{total:.2f}M")
 
+def arch_suffix(lm_config):
+    # 结构开关会改变 state_dict 形状，不能和默认结构共用同一份 checkpoint 文件名，
+    # 否则 strict=False 会静默丢参数/装错权重
+    suffix = "_moe" if getattr(lm_config, "use_moe", False) else ""
+    suffix += "_ga" if getattr(lm_config, "use_gated_attention", False) else ""
+    suffix += "_eng" if getattr(lm_config, "use_engram", False) else ""
+    suffix += "_mtp" if getattr(lm_config, "use_mtp", False) else ""
+    return suffix
+
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
 
@@ -50,8 +59,7 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path=None, save_dir=
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
     if from_weight != "none":
-        moe_suffix = "_moe" if lm_config.use_moe else ""
-        weight_path = f"{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth"
+        weight_path = f"{save_dir}/{from_weight}_{lm_config.hidden_size}{arch_suffix(lm_config)}.pth"
         weights = torch.load(weight_path, map_location=device)
         model.load_state_dict(weights, strict=False) 
         Logger(f"init model from {weight_path}")
@@ -64,9 +72,9 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
     if save_dir is None:
         save_dir = os.path.join(_PROJECT_ROOT, 'out')
     os.makedirs(save_dir, exist_ok=True)
-    moe_suffix = "_moe" if lm_config.use_moe else ""
-    ckp_path  = f"{save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth"
-    resume_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}_resume.pth"
+    suffix = arch_suffix(lm_config)
+    ckp_path  = f"{save_dir}/{weight}_{lm_config.hidden_size}{suffix}.pth"
+    resume_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{suffix}_resume.pth"
     ckp_file = Path(ckp_path)
     resume_file = Path(resume_path)
     if model is not None:
@@ -80,7 +88,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         os.replace(ckp_tmp, ckp_path)
         if tokenizer is not None:
             import shutil
-            hf_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}_hf"
+            hf_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{suffix}_hf"
             os.makedirs(hf_path, exist_ok=True)
             # 保存时用局部 auto_map，使 web_demo 无需依赖 model 包即可加载
             orig_auto_map = lm_config.auto_map
