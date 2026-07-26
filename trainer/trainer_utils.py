@@ -186,7 +186,7 @@ class LMForRewardModel:
         self.dtype = dtype
     @torch.no_grad()
     def get_score(self, messages, responses):
-        history_content = "\n".join([f"{m["role"]}:{m["content"]}" for m in messages[:-1]])
+        history_content = "\n".join([f"{m['role']}:{m['content']}" for m in messages[:-1]])
         querry = messages[-1]["content"] if messages else ""
         messages_content = f"{history_content}\n以上是对话历史。我的新问题是:\n{querry}" if history_content else querry
         eval_messages = [
