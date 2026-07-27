@@ -16,6 +16,12 @@
 #   FULLSFT_BATCH_SIZE     Full SFT 单步 batch size（默认 8）
 #   FULLSFT_ACCUM_STEPS    Full SFT 梯度累积步数（默认 8，等效 batch=64）
 # 若显存更大，可调大 *_BATCH_SIZE、调小 *_ACCUM_STEPS 以提速。
+#
+# 断点续训: Pretrain / Full SFT 都已带 --from_resume 1，中途被杀（OOM、
+# SSH 断线、手动 Ctrl-C）后直接重跑 bash run_train.sh 即可从最近一次
+# save_interval 的 checkpoint 继续，不会从头开始；没有 checkpoint 时会
+# 自动退化为从零训练，不会报错。SSH 连接本身建议配合 USE_TMUX=1（或自
+# 己开 tmux/screen）使用，避免断连直接杀掉前台进程。
 # ==============================================================
 set -euo pipefail
 
@@ -163,6 +169,7 @@ echo "========== [3/3] Pretrain =========="
     --save_interval 2000 \
     --log_interval 200 \
     --dtype bfloat16 \
+    --from_resume 1 \
     $PRETRAIN_EXTRA_ARGS
 echo "Pretrain 完成"
 echo ""
@@ -188,6 +195,7 @@ echo "========== Full SFT =========="
     --save_interval 1000 \
     --log_interval 100 \
     --dtype bfloat16 \
+    --from_resume 1 \
     $FULLSFT_EXTRA_ARGS
 echo "Full SFT 完成"
 echo ""
